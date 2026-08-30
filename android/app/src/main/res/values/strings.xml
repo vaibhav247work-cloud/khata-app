@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Khatabook</string>
+    <string name="title_activity_main">Khatabook</string>
+    <string name="package_name">com.khatabook.pro</string>
+    <string name="custom_url_scheme">com.khatabook.pro</string>
+</resources>
