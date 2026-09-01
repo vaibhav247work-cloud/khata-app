@@ -1,5 +1,6 @@
 {
   "name": "KhataBook Pro",
   "description": "Professional construction business expense, income, and order tracking system with offline-first Google Sheets sync.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

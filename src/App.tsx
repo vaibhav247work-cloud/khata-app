@@ -22,7 +22,14 @@ import {
   Trash2,
   CheckCircle2,
   AlertCircle,
-  Clock
+  Clock,
+  Smartphone,
+  Check,
+  CheckSquare,
+  Square,
+  ListChecks,
+  X,
+  AlertTriangle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { db, type Transaction, type Order, type OrderPayment, type OrderItem } from './db';
@@ -40,7 +47,7 @@ import {
   Pie, 
   Cell,
 } from 'recharts';
-import { jsPDF } from 'jspdf';
+import jsPDF from 'jspdf';
 import { autoTable } from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
 import { Capacitor } from '@capacitor/core';
@@ -435,7 +442,13 @@ export default function App() {
       {/* Main Content */}
       <main className="max-w-4xl mx-auto p-4 sm:p-6">
         <AnimatePresence mode="wait">
-          {activeTab === 'Dashboard' && <Dashboard stats={stats} transactions={transactions} />}
+          {activeTab === 'Dashboard' && (
+            <Dashboard 
+              stats={stats} 
+              transactions={transactions} 
+              onNavigateToTransactions={() => setActiveTab('Transactions')}
+            />
+          )}
           {activeTab === 'Transactions' && (
             <TransactionsModule 
               transactions={filteredTransactions} 
@@ -443,6 +456,8 @@ export default function App() {
               searchQuery={searchQuery}
               setSearchQuery={setSearchQuery}
               markSyncPending={markSyncPending}
+              showToast={showToast}
+              isAdmin={isAdmin}
             />
           )}
           {activeTab === 'Orders' && <OrdersModule orders={orders} onUpdate={() => loadData()} showToast={showToast} isAdmin={isAdmin} markSyncPending={markSyncPending} />}
@@ -455,7 +470,7 @@ export default function App() {
               setCustomDateRange={setCustomDateRange}
             />
           )}
-          {activeTab === 'Reports' && <ReportsModule transactions={transactions} orders={orders} />}
+          {activeTab === 'Reports' && <ReportsModule transactions={transactions} orders={orders} showToast={showToast} />}
           {activeTab === 'Admin' && (
             <AdminModule 
               apiLink={apiLink} 
@@ -538,7 +553,15 @@ function NavItem({ icon: Icon, label, active, onClick }: { icon: any, label: str
   );
 }
 
-function Dashboard({ stats, transactions }: { stats: any, transactions: Transaction[] }) {
+function Dashboard({ 
+  stats, 
+  transactions, 
+  onNavigateToTransactions 
+}: { 
+  stats: any; 
+  transactions: Transaction[]; 
+  onNavigateToTransactions?: () => void;
+}) {
   const recentTxs = useMemo(() => {
     return [...transactions].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
   }, [transactions]);
@@ -559,15 +582,36 @@ function Dashboard({ stats, transactions }: { stats: any, transactions: Transact
       </div>
 
       <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6">
-        <div className="flex items-center justify-between mb-6">
-          <h3 className="font-bold text-lg">Recent Transactions</h3>
-          <ChevronRight className="text-zinc-500 w-5 h-5" />
+        <div 
+          id="dashboard-recent-txs-header"
+          onClick={onNavigateToTransactions}
+          className="flex items-center justify-between mb-6 cursor-pointer group select-none"
+        >
+          <div className="flex items-center gap-2">
+            <h3 className="font-bold text-lg text-white group-hover:text-orange-400 transition-colors">Recent Transactions</h3>
+          </div>
+          <button
+            id="recent-txs-arrow-btn"
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onNavigateToTransactions?.();
+            }}
+            title="View all transactions"
+            className="p-1.5 rounded-xl bg-zinc-800/80 group-hover:bg-orange-500/20 text-zinc-400 group-hover:text-orange-400 transition-all flex items-center justify-center"
+          >
+            <ChevronRight className="w-5 h-5 transition-transform group-hover:translate-x-0.5" />
+          </button>
         </div>
         <div className="space-y-4">
           {recentTxs.map(tx => (
-            <div key={tx.id} className="flex items-center justify-between p-3 bg-zinc-800/50 rounded-2xl">
+            <div 
+              key={tx.id} 
+              onClick={onNavigateToTransactions}
+              className="flex items-center justify-between p-3 bg-zinc-800/50 hover:bg-zinc-800/80 border border-transparent hover:border-zinc-700/60 rounded-2xl cursor-pointer transition-all"
+            >
               <div className="flex items-center gap-3">
-                <div className={`p-2 rounded-xl ${tx.type === 'Credit' ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'}`}>
+                <div className={`p-2 rounded-xl shrink-0 ${tx.type === 'Credit' ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'}`}>
                   {tx.type === 'Credit' ? <ArrowUpRight className="w-5 h-5" /> : <ArrowDownLeft className="w-5 h-5" />}
                 </div>
                 <div>
@@ -606,13 +650,86 @@ function StatCard({ label, value, icon: Icon, color, bg, full, isCount }: any) {
   );
 }
 
-function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, markSyncPending }: any) {
+function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, markSyncPending, showToast }: any) {
   const [showAdd, setShowAdd] = useState(false);
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [isSelectionMode, setIsSelectionMode] = useState(false);
+  const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const sortedTransactions = useMemo(() => {
     return [...transactions].sort((a, b) => b.date.localeCompare(a.date));
   }, [transactions]);
+
+  const selectedTransactions = useMemo(() => {
+    return transactions.filter((t: any) => selectedIds.has(t.id));
+  }, [transactions, selectedIds]);
+
+  const selectedDebitTotal = useMemo(() => {
+    return selectedTransactions
+      .filter((t: any) => t.type === 'Debit')
+      .reduce((sum: number, t: any) => sum + (Number(t.amount) || 0), 0);
+  }, [selectedTransactions]);
+
+  const selectedCreditTotal = useMemo(() => {
+    return selectedTransactions
+      .filter((t: any) => t.type === 'Credit')
+      .reduce((sum: number, t: any) => sum + (Number(t.amount) || 0), 0);
+  }, [selectedTransactions]);
+
+  const allVisibleSelected = sortedTransactions.length > 0 && sortedTransactions.every((t: any) => selectedIds.has(t.id));
+
+  const toggleSelect = (id: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (allVisibleSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(sortedTransactions.map((t: any) => t.id)));
+    }
+  };
+
+  const cancelSelection = () => {
+    setSelectedIds(new Set());
+  };
+
+  const executeBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    setIsDeleting(true);
+
+    try {
+      const idsToDelete = Array.from(selectedIds);
+      await db.transactions.bulkDelete(idsToDelete);
+      
+      markSyncPending();
+      setSelectedIds(new Set());
+      setShowBulkDeleteConfirm(false);
+      
+      if (showToast) {
+        showToast(`Deleted ${idsToDelete.length} transaction${idsToDelete.length > 1 ? 's' : ''} successfully`, 'success');
+      }
+      onAdd();
+    } catch (err) {
+      console.error('Bulk delete error:', err);
+      if (showToast) {
+        showToast('Failed to delete transactions. Please try again.', 'error');
+      }
+    } finally {
+      setIsDeleting(false);
+    }
+  };
 
   const closeTransactionForm = () => {
     setShowAdd(false);
@@ -657,10 +774,12 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
       animate={{ opacity: 1, x: 0 }}
       className="space-y-6"
     >
-      <div className="flex items-center gap-4">
+      {/* Top Search & Action Controls */}
+      <div className="flex items-center gap-3">
         <div className="relative flex-1">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500 w-5 h-5" />
           <input 
+            id="transaction-search-input"
             type="text" 
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
@@ -668,53 +787,194 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
             className="w-full bg-zinc-900 border border-zinc-800 rounded-2xl pl-12 pr-4 py-4 text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
           />
         </div>
+
+        {sortedTransactions.length > 0 && (
+          <button
+            id="toggle-multi-select-btn"
+            onClick={() => {
+              if (selectedIds.size > 0) {
+                cancelSelection();
+              } else {
+                toggleSelectAll();
+              }
+            }}
+            title={selectedIds.size > 0 ? 'Clear Selection' : 'Select All Transactions'}
+            className={`p-4 rounded-2xl border transition-all flex items-center justify-center shrink-0 ${
+              selectedIds.size > 0 
+                ? 'bg-orange-500/20 border-orange-500 text-orange-400 shadow-lg shadow-orange-500/20' 
+                : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-700'
+            }`}
+          >
+            <ListChecks className="w-6 h-6" />
+          </button>
+        )}
+
         <button 
+          id="add-transaction-open-btn"
           onClick={() => {
             setEditingTransaction(null);
             setShowAdd(true);
           }}
-          className="bg-orange-500 p-4 rounded-2xl text-white shadow-lg shadow-orange-500/20 active:scale-95 transition-all"
+          className="bg-orange-500 hover:bg-orange-600 p-4 rounded-2xl text-white shadow-lg shadow-orange-500/20 active:scale-95 transition-all shrink-0"
+          title="Add Transaction"
         >
           <Plus className="w-6 h-6" />
         </button>
       </div>
 
-      <div className="space-y-4">
-        {sortedTransactions.map((tx: any) => (
-          <div key={tx.id} className="bg-zinc-900 border border-zinc-800 rounded-3xl p-4 flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div className={`p-3 rounded-2xl ${tx.type === 'Credit' ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'}`}>
-                {tx.type === 'Credit' ? <ArrowUpRight className="w-6 h-6" /> : <ArrowDownLeft className="w-6 h-6" />}
+      {/* Multi-Select Action Toolbar - Autohidden if none selected */}
+      <AnimatePresence>
+        {selectedIds.size > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: -8, scale: 0.99 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -8, scale: 0.99 }}
+            transition={{ duration: 0.15 }}
+            className="bg-gradient-to-r from-zinc-900 via-zinc-900 to-zinc-850 border border-orange-500/40 rounded-2xl p-3.5 shadow-xl space-y-2.5"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2.5">
+                <button
+                  id="select-all-transactions-btn"
+                  onClick={toggleSelectAll}
+                  className="flex items-center gap-2 text-xs font-bold px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition-colors"
+                >
+                  {allVisibleSelected ? (
+                    <>
+                      <CheckSquare className="w-3.5 h-3.5 text-orange-500" />
+                      Deselect All
+                    </>
+                  ) : (
+                    <>
+                      <Square className="w-3.5 h-3.5 text-zinc-400" />
+                      Select All ({sortedTransactions.length})
+                    </>
+                  )}
+                </button>
+
+                <span className="bg-orange-500/20 text-orange-400 border border-orange-500/30 text-xs font-bold px-2.5 py-1 rounded-xl">
+                  {selectedIds.size} Selected
+                </span>
               </div>
-              <div>
-                <p className="font-bold">{tx.category}</p>
-                <p className="text-zinc-500 text-xs">{tx.description}</p>
-                <div className="flex items-center gap-2 mt-1">
-                  <span className="bg-zinc-800 text-zinc-400 text-[10px] px-2 py-0.5 rounded-full uppercase font-bold">{tx.payment_type}</span>
-                  <span className="text-zinc-600 text-[10px]">{format(parseISO(tx.date), 'dd MMM yyyy')}</span>
-                </div>
+
+              <div className="flex items-center gap-2 ml-auto">
+                <button
+                  id="bulk-delete-trigger-btn"
+                  onClick={() => setShowBulkDeleteConfirm(true)}
+                  className="bg-red-500/15 hover:bg-red-500 border border-red-500/30 hover:border-red-500 text-red-400 hover:text-white text-xs font-bold px-3.5 py-1.5 rounded-xl flex items-center gap-1.5 transition-all shadow-lg shadow-red-500/10"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Delete ({selectedIds.size})
+                </button>
+
+                <button
+                  id="cancel-selection-btn"
+                  onClick={cancelSelection}
+                  className="p-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition-colors"
+                  title="Clear selection"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
             </div>
-            <div className="text-right">
-              <p className={`text-lg font-bold ${tx.type === 'Credit' ? 'text-green-500' : 'text-red-500'}`}>
-                {tx.type === 'Credit' ? '+' : '-'}₹{tx.amount.toLocaleString()}
-              </p>
-              {tx.reference && <p className="text-zinc-600 text-[10px]">Ref: {tx.reference}</p>}
-              {!tx.order_id && (
-                <button
-                  onClick={() => {
-                    setEditingTransaction(tx);
-                    setShowAdd(false);
-                  }}
-                  className="mt-2 inline-flex items-center gap-1 text-[10px] font-bold text-zinc-400 hover:text-orange-400 transition-colors"
-                  title="Edit Transaction"
-                >
-                  <Pencil className="w-3 h-3" /> Edit
-                </button>
+
+            {/* Selection Breakdown */}
+            <div className="pt-2 border-t border-zinc-800/80 flex flex-wrap items-center gap-3 text-[11px] text-zinc-400">
+              <span>Selected totals:</span>
+              {selectedCreditTotal > 0 && (
+                <span className="text-green-400 font-bold bg-green-500/10 px-2 py-0.5 rounded-md border border-green-500/20">
+                  Credit: +₹{selectedCreditTotal.toLocaleString()}
+                </span>
+              )}
+              {selectedDebitTotal > 0 && (
+                <span className="text-red-400 font-bold bg-red-500/10 px-2 py-0.5 rounded-md border border-red-500/20">
+                  Debit: -₹{selectedDebitTotal.toLocaleString()}
+                </span>
               )}
             </div>
-          </div>
-        ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Transactions List */}
+      <div className="space-y-3">
+        {sortedTransactions.map((tx: any) => {
+          const isSelected = selectedIds.has(tx.id);
+
+          return (
+            <div 
+              key={tx.id} 
+              id={`transaction-card-${tx.id}`}
+              className={`border rounded-2xl p-3.5 sm:p-4 flex items-center justify-between transition-all select-none ${
+                isSelected 
+                  ? 'bg-orange-500/10 border-orange-500/60 shadow-lg shadow-orange-500/5 ring-1 ring-orange-500/30' 
+                  : 'bg-zinc-900 border-zinc-800 hover:border-zinc-700'
+              }`}
+            >
+              <div className="flex items-center gap-2.5 sm:gap-3.5 flex-1 min-w-0 pr-2">
+                {/* Small Compact Checkbox Button */}
+                <button
+                  id={`select-checkbox-${tx.id}`}
+                  type="button"
+                  onClick={(e) => toggleSelect(tx.id, e)}
+                  className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 transition-all ${
+                    isSelected 
+                      ? 'bg-orange-500 border-orange-500 text-white shadow-sm shadow-orange-500/30' 
+                      : 'border-zinc-700/80 bg-zinc-800/30 hover:border-zinc-500 text-transparent hover:bg-zinc-800'
+                  }`}
+                  title={isSelected ? 'Deselect transaction' : 'Select transaction'}
+                >
+                  <Check className={`w-3.5 h-3.5 stroke-[3] ${isSelected ? 'opacity-100' : 'opacity-0'}`} />
+                </button>
+
+                {/* Small Compact Type Indicator */}
+                <div className={`p-1.5 rounded-lg shrink-0 ${tx.type === 'Credit' ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'}`}>
+                  {tx.type === 'Credit' ? <ArrowUpRight className="w-3.5 h-3.5" /> : <ArrowDownLeft className="w-3.5 h-3.5" />}
+                </div>
+
+                {/* High-Visibility Expanded Text Block */}
+                <div className="min-w-0 flex-1">
+                  <p className="font-bold text-sm sm:text-base text-zinc-100 truncate leading-snug">{tx.category}</p>
+                  {tx.description && (
+                    <p className="text-zinc-400 text-xs truncate mt-0.5 leading-normal">{tx.description}</p>
+                  )}
+                  <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 mt-1">
+                    <span className="bg-zinc-800/90 text-zinc-300 text-[10px] px-2 py-0.5 rounded-md uppercase font-bold tracking-wider">{tx.payment_type}</span>
+                    <span className="text-zinc-500 text-[10px]">{format(parseISO(tx.date), 'dd MMM yyyy')}</span>
+                    {tx.order_id && (
+                      <span className="bg-blue-500/10 text-blue-400 border border-blue-500/20 text-[9px] px-1.5 py-0.5 rounded font-bold">
+                        Order
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="text-right shrink-0">
+                <p className={`text-base sm:text-lg font-extrabold tracking-tight ${tx.type === 'Credit' ? 'text-green-500' : 'text-red-500'}`}>
+                  {tx.type === 'Credit' ? '+' : '-'}₹{Number(tx.amount || 0).toLocaleString()}
+                </p>
+                {tx.reference && <p className="text-zinc-500 text-[10px] truncate max-w-[110px] mt-0.5">Ref: {tx.reference}</p>}
+                
+                {!tx.order_id && (
+                  <button
+                    id={`edit-tx-btn-${tx.id}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setEditingTransaction(tx);
+                      setShowAdd(false);
+                    }}
+                    className="mt-1.5 inline-flex items-center gap-1 text-[10px] font-bold text-zinc-400 hover:text-orange-400 transition-colors"
+                    title="Edit Transaction"
+                  >
+                    <Pencil className="w-3 h-3" /> Edit
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+
         {transactions.length === 0 && (
           <div className="text-center py-20 bg-zinc-900/50 border border-zinc-800 border-dashed rounded-[40px]">
             <div className="w-16 h-16 bg-zinc-800 rounded-2xl flex items-center justify-center mx-auto mb-4">
@@ -726,7 +986,89 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
         )}
       </div>
 
-      {/* Add Modal */}
+      {/* Bulk Delete Confirmation Modal */}
+      <AnimatePresence>
+        {showBulkDeleteConfirm && (
+          <div 
+            className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+            onClick={() => !isDeleting && setShowBulkDeleteConfirm(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-zinc-900 border border-zinc-800 rounded-[32px] p-6 sm:p-8 max-w-md w-full shadow-2xl space-y-6"
+            >
+              <div className="w-14 h-14 rounded-2xl bg-red-500/10 border border-red-500/20 text-red-500 flex items-center justify-center mx-auto">
+                <AlertTriangle className="w-7 h-7" />
+              </div>
+
+              <div className="text-center space-y-2">
+                <h3 className="text-xl font-bold text-white">
+                  Delete {selectedIds.size} Transaction{selectedIds.size > 1 ? 's' : ''}?
+                </h3>
+                <p className="text-xs sm:text-sm text-zinc-400">
+                  Are you sure you want to permanently delete the selected entries? This will clean up your local records and update your ledger balance.
+                </p>
+              </div>
+
+              {/* Breakdown */}
+              <div className="bg-zinc-800/50 border border-zinc-700/40 rounded-2xl p-4 space-y-2 text-xs">
+                <div className="flex justify-between text-zinc-400">
+                  <span>Selected Records:</span>
+                  <span className="font-bold text-white">{selectedIds.size}</span>
+                </div>
+                {selectedDebitTotal > 0 && (
+                  <div className="flex justify-between text-red-400">
+                    <span>Total Expense (Debit):</span>
+                    <span className="font-bold">-₹{selectedDebitTotal.toLocaleString()}</span>
+                  </div>
+                )}
+                {selectedCreditTotal > 0 && (
+                  <div className="flex justify-between text-green-400">
+                    <span>Total Income (Credit):</span>
+                    <span className="font-bold">+₹{selectedCreditTotal.toLocaleString()}</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  id="cancel-bulk-delete-btn"
+                  type="button"
+                  disabled={isDeleting}
+                  onClick={() => setShowBulkDeleteConfirm(false)}
+                  className="flex-1 py-3.5 px-4 rounded-2xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-bold text-sm transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  id="confirm-bulk-delete-btn"
+                  type="button"
+                  disabled={isDeleting}
+                  onClick={executeBulkDelete}
+                  className="flex-1 py-3.5 px-4 rounded-2xl bg-red-500 hover:bg-red-600 active:scale-98 text-white font-bold text-sm transition-all flex items-center justify-center gap-2 shadow-lg shadow-red-500/20 disabled:opacity-60"
+                >
+                  {isDeleting ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      Deleting...
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-4 h-4" />
+                      Delete
+                    </>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Add / Edit Modal */}
       <AnimatePresence>
         {(showAdd || editingTransaction) && (
           <div 
@@ -746,14 +1088,14 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-bold text-zinc-500 uppercase mb-2">Type</label>
-                    <select name="type" defaultValue={editingTransaction?.type || 'Debit'} className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm">
+                    <select name="type" defaultValue={editingTransaction?.type || 'Debit'} className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm text-white">
                       <option value="Debit">Debit (Expense)</option>
                       <option value="Credit">Credit (Income)</option>
                     </select>
                   </div>
                   <div>
                     <label className="block text-xs font-bold text-zinc-500 uppercase mb-2">Date</label>
-                    <input name="date" type="date" defaultValue={editingTransaction ? format(parseISO(editingTransaction.date), 'yyyy-MM-dd') : format(new Date(), 'yyyy-MM-dd')} className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm" required />
+                    <input name="date" type="date" defaultValue={editingTransaction ? format(parseISO(editingTransaction.date), 'yyyy-MM-dd') : format(new Date(), 'yyyy-MM-dd')} className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm text-white" required />
                   </div>
                 </div>
 
@@ -764,7 +1106,7 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
                     type="text" 
                     defaultValue={editingTransaction?.category || ''}
                     placeholder="e.g. Cement, Site Payment" 
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm" 
+                    className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm text-white" 
                     required 
                   />
                 </div>
@@ -778,13 +1120,13 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
                       defaultValue={editingTransaction?.amount ?? ''}
                       inputMode="decimal"
                       placeholder="0.00" 
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm no-spinner" 
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm no-spinner text-white" 
                       required 
                     />
                   </div>
                   <div>
                     <label className="block text-xs font-bold text-zinc-500 uppercase mb-2">Payment Mode</label>
-                    <select name="payment_type" defaultValue={editingTransaction?.payment_type || PAYMENT_TYPES[0]} className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm">
+                    <select name="payment_type" defaultValue={editingTransaction?.payment_type || PAYMENT_TYPES[0]} className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm text-white">
                       {PAYMENT_TYPES.map(p => <option key={p} value={p}>{p}</option>)}
                     </select>
                   </div>
@@ -792,17 +1134,17 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
 
                 <div>
                   <label className="block text-xs font-bold text-zinc-500 uppercase mb-2">Description</label>
-                  <input name="description" type="text" defaultValue={editingTransaction?.description || ''} placeholder="What is this for?" className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm" required />
+                  <input name="description" type="text" defaultValue={editingTransaction?.description || ''} placeholder="What is this for?" className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm text-white" required />
                 </div>
 
                 <div>
                   <label className="block text-xs font-bold text-zinc-500 uppercase mb-2">Reference (Optional)</label>
-                  <input name="reference" type="text" defaultValue={editingTransaction?.reference || ''} placeholder="Bill No / UPI ID" className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm" />
+                  <input name="reference" type="text" defaultValue={editingTransaction?.reference || ''} placeholder="Bill No / UPI ID" className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm text-white" />
                 </div>
 
                 <div className="flex gap-4 pt-4">
-                  <button type="button" onClick={closeTransactionForm} className="flex-1 bg-zinc-800 py-4 rounded-2xl font-bold text-sm">Cancel</button>
-                  <button type="submit" className="flex-1 bg-orange-500 py-4 rounded-2xl font-bold text-sm shadow-lg shadow-orange-500/20">{editingTransaction ? 'Update Entry' : 'Save Entry'}</button>
+                  <button type="button" onClick={closeTransactionForm} className="flex-1 bg-zinc-800 hover:bg-zinc-700 py-4 rounded-2xl font-bold text-sm text-zinc-300 transition-colors">Cancel</button>
+                  <button type="submit" className="flex-1 bg-orange-500 hover:bg-orange-600 py-4 rounded-2xl font-bold text-sm text-white shadow-lg shadow-orange-500/20 transition-colors">{editingTransaction ? 'Update Entry' : 'Save Entry'}</button>
                 </div>
               </form>
             </motion.div>
@@ -818,8 +1160,24 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending }:
   const [editingOrder, setEditingOrder] = useState<Order | null>(null);
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
+  const [orderSearchQuery, setOrderSearchQuery] = useState('');
   const createEmptyOrderItem = (): OrderItem => ({ id: crypto.randomUUID(), material: '', quantity: '', amount: 0 });
   const [newItems, setNewItems] = useState<OrderItem[]>([createEmptyOrderItem()]);
+
+  const filteredOrders = useMemo(() => {
+    const sorted = [...orders].sort((a: Order, b: Order) => b.date.localeCompare(a.date));
+    if (!orderSearchQuery.trim()) return sorted;
+
+    const q = orderSearchQuery.toLowerCase().trim();
+    return sorted.filter((order: Order) => {
+      const matchSupplier = (order.supplier || '').toLowerCase().includes(q);
+      const matchItems = (order.items || []).some(item => 
+        (item.material || '').toLowerCase().includes(q) ||
+        (item.quantity || '').toLowerCase().includes(q)
+      );
+      return matchSupplier || matchItems;
+    });
+  }, [orders, orderSearchQuery]);
 
   const getItemSummary = (items: OrderItem[]) => {
     const validItems = (items || []).filter(i => i.material.trim() !== '');
@@ -1035,21 +1393,41 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending }:
       animate={{ opacity: 1, x: 0 }}
       className="space-y-6"
     >
-      <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-bold">Order</h2>
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+        <div className="relative flex-1">
+          <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500 w-5 h-5" />
+          <input 
+            id="order-search-input"
+            type="text" 
+            value={orderSearchQuery}
+            onChange={(e) => setOrderSearchQuery(e.target.value)}
+            placeholder="Search by supplier or material..." 
+            className="w-full bg-zinc-900 border border-zinc-800 rounded-2xl pl-12 pr-10 py-3.5 sm:py-4 text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-orange-500 text-sm"
+          />
+          {orderSearchQuery && (
+            <button
+              id="clear-order-search-btn"
+              type="button"
+              onClick={() => setOrderSearchQuery('')}
+              className="absolute right-3.5 top-1/2 -translate-y-1/2 p-1 rounded-lg text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors"
+              title="Clear search"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
         <button 
+          id="add-new-order-btn"
           onClick={openAddOrderForm}
-          className="bg-zinc-900 border border-zinc-800 px-5 py-3 rounded-2xl text-white font-bold shadow-xl active:scale-95 transition-all flex items-center gap-2 group"
+          className="bg-orange-500 hover:bg-orange-600 px-5 py-3.5 sm:py-4 rounded-2xl text-white font-bold shadow-lg shadow-orange-500/20 active:scale-95 transition-all flex items-center justify-center gap-2 shrink-0"
         >
-          <div className="bg-orange-500 p-1.5 rounded-lg group-hover:scale-110 transition-transform">
-            <Plus className="w-4 h-4 text-white" />
-          </div>
+          <Plus className="w-5 h-5 text-white" />
           <span className="text-sm">New Order</span>
         </button>
       </div>
 
       <div className="grid gap-4">
-        {orders.map((order: Order) => (
+        {filteredOrders.map((order: Order) => (
           <div key={order.order_id} className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 relative group">
             <div className="absolute top-6 right-6 flex items-center gap-2">
               <button
@@ -1129,7 +1507,32 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending }:
             )}
           </div>
         ))}
-        {orders.length === 0 && <p className="text-center text-zinc-500 py-12">No orders found</p>}
+
+        {filteredOrders.length === 0 && (
+          <div className="text-center py-16 bg-zinc-900/50 border border-zinc-800 border-dashed rounded-[32px] p-6 space-y-2">
+            <div className="w-12 h-12 bg-zinc-800 rounded-2xl flex items-center justify-center mx-auto text-zinc-500 mb-2">
+              <Search className="w-6 h-6" />
+            </div>
+            <p className="text-zinc-400 font-bold">
+              {orderSearchQuery ? 'No matching orders found' : 'No orders recorded yet'}
+            </p>
+            <p className="text-zinc-600 text-xs max-w-sm mx-auto">
+              {orderSearchQuery 
+                ? `No orders match "${orderSearchQuery}". Try searching by a different supplier name or material description.`
+                : 'Tap New Order to record your first supplier order.'
+              }
+            </p>
+            {orderSearchQuery && (
+              <button
+                type="button"
+                onClick={() => setOrderSearchQuery('')}
+                className="mt-3 inline-block text-xs font-bold text-orange-400 hover:text-orange-300 underline"
+              >
+                Clear search filter
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Add Order Modal */}
@@ -1446,7 +1849,10 @@ function PassbookModule({ transactions, filterDate, setFilterDate, customDateRan
   );
 }
 
-function ReportsModule({ transactions, orders }: any) {
+function ReportsModule({ transactions, orders, showToast }: any) {
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const [isExportingExcel, setIsExportingExcel] = useState(false);
+
   const creditTxs = transactions.filter((t: any) => t.type === 'Credit');
   const debitTxs = transactions.filter((t: any) => t.type === 'Debit');
 
@@ -1474,7 +1880,7 @@ function ReportsModule({ transactions, orders }: any) {
     return Object.entries(counts).map(([name, value]) => ({ name, value }));
   }, [transactions]);
 
-  const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
+  const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
     const bytes = new Uint8Array(buffer);
     const chunkSize = 0x8000;
     let binary = '';
@@ -1484,149 +1890,303 @@ function ReportsModule({ transactions, orders }: any) {
     return window.btoa(binary);
   };
 
-  const saveOrShareReport = async (data: string, filename: string, mimeType: string) => {
+  // Helper to safely trigger a browser download for Web / Desktop
+  const downloadBlobFallback = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 1000);
+  };
+
+  // Native Android & iOS Capacitor export/share handler
+  const saveOrShareReport = async (base64Data: string, filename: string, mimeType: string): Promise<boolean> => {
     if (!Capacitor.isNativePlatform()) {
       return false;
     }
 
-    const savedFile = await Filesystem.writeFile({
-      path: filename,
-      data,
-      directory: Directory.Cache,
-      recursive: true,
-    });
-    await Share.share({
-      title: filename,
-      text: `Khatabook report: ${filename}`,
-      url: savedFile.uri,
-      dialogTitle: `Save or share ${mimeType === 'application/pdf' ? 'PDF' : 'Excel'} report`,
-    });
-    return true;
+    try {
+      const cleanBase64 = base64Data.includes('base64,')
+        ? base64Data.split('base64,')[1]
+        : base64Data;
+
+      // 1. Write file to application Cache directory
+      const writeResult = await Filesystem.writeFile({
+        path: filename,
+        data: cleanBase64,
+        directory: Directory.Cache,
+        recursive: true,
+      });
+
+      // 2. Get file URI
+      const uriResult = await Filesystem.getUri({
+        directory: Directory.Cache,
+        path: filename,
+      });
+
+      const fileUri = uriResult.uri || writeResult.uri;
+
+      // 3. Share with files array (Crucial for Android FileProvider & iOS)
+      try {
+        await Share.share({
+          title: filename,
+          text: `KhataBook Report: ${filename}`,
+          files: [fileUri],
+          dialogTitle: `Share or Save ${mimeType.includes('pdf') ? 'PDF' : 'Excel'} Report`,
+        });
+      } catch (shareErr: any) {
+        // Fallback for older share implementations
+        const errStr = String(shareErr?.message || '').toLowerCase();
+        if (errStr.includes('cancel') || errStr.includes('dismiss') || errStr.includes('abort')) {
+          return true; // user closed sheet
+        }
+        await Share.share({
+          title: filename,
+          url: fileUri,
+          dialogTitle: `Save ${filename}`,
+        });
+      }
+      return true;
+    } catch (err: any) {
+      console.warn('Native report share/save error:', err);
+      const errMsg = String(err?.message || '').toLowerCase();
+      if (errMsg.includes('cancel') || errMsg.includes('dismiss') || errMsg.includes('abort')) {
+        return true;
+      }
+      return false;
+    }
   };
 
   const exportPDF = async () => {
+    if (isExportingPdf) return;
+    setIsExportingPdf(true);
+
     try {
       const doc = new jsPDF();
+      (doc as any).autoTable = (options: any) => autoTable(doc, options);
 
-    // jsPDF's built-in fonts are not Unicode fonts. Embed Nirmala UI so
-    // Devanagari and other supported Unicode characters are retained.
-    const fontResponse = await fetch('/fonts/Nirmala.ttf');
-    if (!fontResponse.ok) {
-      throw new Error('Unicode PDF font could not be loaded');
-    }
-    const fontBase64 = arrayBufferToBase64(await fontResponse.arrayBuffer());
-    doc.addFileToVFS('Nirmala.ttf', fontBase64);
-    doc.addFont('Nirmala.ttf', 'Nirmala', 'normal');
-    doc.setFont('Nirmala');
-
-    const formatReportDate = (value: string) => {
+      // Attempt to load Nirmala.ttf safely without crashing if offline or missing
+      let hasCustomFont = false;
       try {
-        return format(parseISO(value), 'dd MMM yyyy, hh:mm a');
-      } catch {
-        return value;
+        const fontUrls = ['/fonts/Nirmala.ttf', './fonts/Nirmala.ttf', 'fonts/Nirmala.ttf'];
+        for (const url of fontUrls) {
+          try {
+            const fontResponse = await fetch(url);
+            if (fontResponse.ok) {
+              const fontBuf = await fontResponse.arrayBuffer();
+              if (fontBuf && fontBuf.byteLength > 0) {
+                const fontBase64 = arrayBufferToBase64(fontBuf);
+                doc.addFileToVFS('Nirmala.ttf', fontBase64);
+                doc.addFont('Nirmala.ttf', 'Nirmala', 'normal');
+                doc.setFont('Nirmala');
+                hasCustomFont = true;
+                break;
+              }
+            }
+          } catch {
+            // Next URL
+          }
+        }
+      } catch (fontErr) {
+        console.warn('Custom font load bypassed, falling back to standard font:', fontErr);
       }
-    };
 
-    const creditTotal = creditTxs.reduce((sum: number, tx: any) => sum + tx.amount, 0);
-    const debitTotal = debitTxs.reduce((sum: number, tx: any) => sum + tx.amount, 0);
+      const activeFont = hasCustomFont ? 'Nirmala' : 'helvetica';
+      const cur = hasCustomFont ? '₹' : 'Rs. ';
 
-    // Branded report header and quick totals.
-    doc.setFillColor(24, 24, 27);
-    doc.roundedRect(10, 10, 190, 24, 4, 4, 'F');
-    doc.setTextColor(255, 255, 255);
-    doc.setFontSize(16);
-    doc.text('BuildTrack Pro', 16, 20);
-    doc.setFontSize(9);
-    doc.setTextColor(212, 212, 216);
-    doc.text('Financial Transaction Report', 16, 28);
-    doc.text(`Generated: ${format(new Date(), 'dd MMM yyyy, hh:mm a')}`, 132, 28);
+      const formatReportDate = (value: string) => {
+        try {
+          return format(parseISO(value), 'dd MMM yyyy, hh:mm a');
+        } catch {
+          return value || '-';
+        }
+      };
 
-    doc.setFillColor(240, 253, 244);
-    doc.roundedRect(10, 39, 88, 14, 3, 3, 'F');
-    doc.setFillColor(254, 242, 242);
-    doc.roundedRect(102, 39, 88, 14, 3, 3, 'F');
-    doc.setFontSize(8);
-    doc.setTextColor(22, 101, 52);
-    doc.text(`Total Credit  ₹${creditTotal.toLocaleString('en-IN')}`, 16, 57);
-    doc.setTextColor(185, 28, 28);
-    doc.text(`Total Debit  ₹${debitTotal.toLocaleString('en-IN')}`, 108, 57);
-    
-    const tableData = transactions.map((t: any) => [
-      formatReportDate(t.date),
-      t.type,
-      t.category,
-      `₹${t.amount.toLocaleString('en-IN')}`,
-      t.payment_type,
-      t.description
-    ]);
+      const creditTotal = creditTxs.reduce((sum: number, tx: any) => sum + (Number(tx.amount) || 0), 0);
+      const debitTotal = debitTxs.reduce((sum: number, tx: any) => sum + (Number(tx.amount) || 0), 0);
 
-    autoTable(doc, {
-      head: [['Date', 'Type', 'Category', 'Amount', 'Payment', 'Description']],
-      body: tableData,
-      startY: 60,
-      theme: 'grid',
-      styles: {
-        font: 'Nirmala',
-        fontSize: 7,
-        textColor: [39, 39, 42],
-        lineColor: [212, 212, 216],
-        lineWidth: 0.15,
-        cellPadding: 1.2,
-      },
-      headStyles: {
-        font: 'Nirmala',
-        fillColor: [234, 88, 12],
-        textColor: [255, 255, 255],
-        lineColor: [194, 65, 12],
-        lineWidth: 0.15,
-        fontStyle: 'normal',
-      },
-      alternateRowStyles: { fillColor: [250, 250, 250] },
-      columnStyles: {
-        0: { cellWidth: 31 },
-        1: { cellWidth: 18 },
-        2: { cellWidth: 30 },
-        3: { cellWidth: 23, halign: 'right' },
-        4: { cellWidth: 27 },
-        5: { cellWidth: 'auto' },
-      },
-      didDrawPage: (data) => {
-        doc.setFont('Nirmala');
-        doc.setFontSize(8);
-        doc.setTextColor(113, 113, 122);
-        doc.text(`Page ${data.pageNumber}`, 190, 288, { align: 'right' });
-      },
-    });
+      // Branded report header
+      doc.setFillColor(24, 24, 27);
+      doc.roundedRect(10, 10, 190, 24, 4, 4, 'F');
+      doc.setTextColor(255, 255, 255);
+      doc.setFont(activeFont);
+      doc.setFontSize(16);
+      doc.text('KhataBook Pro', 16, 20);
+      doc.setFontSize(9);
+      doc.setTextColor(212, 212, 216);
+      doc.text('Financial Transaction & Ledger Report', 16, 28);
+      doc.text(`Generated: ${format(new Date(), 'dd MMM yyyy, hh:mm a')}`, 125, 28);
 
-      const filename = `BuildTrack_Report_${format(new Date(), 'yyyyMMdd')}.pdf`;
-      const shared = await saveOrShareReport(
-        doc.output('datauristring').split(',')[1],
+      // Quick summary boxes
+      doc.setFillColor(240, 253, 244);
+      doc.roundedRect(10, 38, 88, 16, 3, 3, 'F');
+      doc.setFillColor(254, 242, 242);
+      doc.roundedRect(102, 38, 88, 16, 3, 3, 'F');
+      
+      doc.setFont(activeFont);
+      doc.setFontSize(8);
+      doc.setTextColor(22, 101, 52);
+      doc.text(`Total Credit:  ${cur}${creditTotal.toLocaleString('en-IN')}`, 16, 48);
+      doc.setTextColor(185, 28, 28);
+      doc.text(`Total Debit:  ${cur}${debitTotal.toLocaleString('en-IN')}`, 108, 48);
+
+      const tableData = (transactions || []).map((t: any) => [
+        formatReportDate(t.date),
+        t.type || '-',
+        t.category || '-',
+        `${cur}${(Number(t.amount) || 0).toLocaleString('en-IN')}`,
+        t.payment_type || '-',
+        t.description || '-'
+      ]);
+
+      autoTable(doc, {
+        head: [['Date', 'Type', 'Category', 'Amount', 'Payment', 'Description']],
+        body: tableData.length > 0 ? tableData : [['No records', '-', '-', '-', '-', '-']],
+        startY: 58,
+        theme: 'grid',
+        styles: {
+          font: activeFont,
+          fontSize: 7,
+          textColor: [39, 39, 42],
+          lineColor: [212, 212, 216],
+          lineWidth: 0.15,
+          cellPadding: 1.2,
+        },
+        headStyles: {
+          font: activeFont,
+          fillColor: [234, 88, 12],
+          textColor: [255, 255, 255],
+          lineColor: [194, 65, 12],
+          lineWidth: 0.15,
+          fontStyle: 'normal',
+        },
+        alternateRowStyles: { fillColor: [250, 250, 250] },
+        columnStyles: {
+          0: { cellWidth: 31 },
+          1: { cellWidth: 18 },
+          2: { cellWidth: 30 },
+          3: { cellWidth: 23, halign: 'right' },
+          4: { cellWidth: 27 },
+          5: { cellWidth: 'auto' },
+        },
+        didDrawPage: (data) => {
+          doc.setFont(activeFont);
+          doc.setFontSize(8);
+          doc.setTextColor(113, 113, 122);
+          doc.text(`Page ${data.pageNumber}`, 190, 288, { align: 'right' });
+        },
+      });
+
+      const filename = `KhataBook_Report_${format(new Date(), 'yyyyMMdd_HHmm')}.pdf`;
+      const pdfArrayBuffer = doc.output('arraybuffer');
+      const pdfBase64 = arrayBufferToBase64(pdfArrayBuffer);
+
+      const isHandledNatively = await saveOrShareReport(
+        pdfBase64,
         filename,
         'application/pdf'
       );
-      if (!shared) doc.save(filename);
-    } catch (error) {
-      console.error('PDF export failed', error);
-      window.alert('Unable to export PDF. Please try again.');
+
+      if (!isHandledNatively) {
+        const pdfBlob = new Blob([pdfArrayBuffer], { type: 'application/pdf' });
+        downloadBlobFallback(pdfBlob, filename);
+      }
+
+      if (showToast) {
+        showToast('PDF report generated successfully!', 'success');
+      }
+    } catch (error: any) {
+      console.error('PDF export failed:', error);
+      if (showToast) {
+        showToast('Unable to export PDF. Please check data and try again.', 'error');
+      }
+    } finally {
+      setIsExportingPdf(false);
     }
   };
 
   const exportExcel = async () => {
+    if (isExportingExcel) return;
+    setIsExportingExcel(true);
+
     try {
-      const ws = XLSX.utils.json_to_sheet(transactions);
+      const formattedRows = (transactions || []).map((t: any, index: number) => {
+        let displayDate = t.date;
+        try {
+          displayDate = format(parseISO(t.date), 'yyyy-MM-dd HH:mm');
+        } catch {
+          displayDate = t.date || '';
+        }
+
+        return {
+          'S.No': index + 1,
+          'Date & Time': displayDate,
+          'Type': t.type || '',
+          'Category': t.category || '',
+          'Amount (INR)': Number(t.amount) || 0,
+          'Payment Mode': t.payment_type || '',
+          'Description': t.description || '',
+          'Reference': t.reference || '',
+          'Order ID': t.order_id || '',
+        };
+      });
+
+      const ws = XLSX.utils.json_to_sheet(
+        formattedRows.length > 0 
+          ? formattedRows 
+          : [{ 'Message': 'No transactions recorded' }]
+      );
+
+      // Auto-size worksheet columns for neat layout
+      const colWidths = [
+        { wch: 6 },  // S.No
+        { wch: 18 }, // Date
+        { wch: 10 }, // Type
+        { wch: 20 }, // Category
+        { wch: 14 }, // Amount
+        { wch: 16 }, // Payment Mode
+        { wch: 30 }, // Description
+        { wch: 16 }, // Reference
+        { wch: 16 }, // Order ID
+      ];
+      ws['!cols'] = colWidths;
+
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, "Transactions");
-      const filename = `BuildTrack_Report_${format(new Date(), 'yyyyMMdd')}.xlsx`;
+
+      const filename = `KhataBook_Report_${format(new Date(), 'yyyyMMdd_HHmm')}.xlsx`;
       const excelBase64 = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
-      const shared = await saveOrShareReport(
+
+      const isHandledNatively = await saveOrShareReport(
         excelBase64,
         filename,
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
       );
-      if (!shared) XLSX.writeFile(wb, filename);
-    } catch (error) {
-      console.error('Excel export failed', error);
-      window.alert('Unable to export Excel file. Please try again.');
+
+      if (!isHandledNatively) {
+        const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+        const excelBlob = new Blob([excelBuffer], { 
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+        });
+        downloadBlobFallback(excelBlob, filename);
+      }
+
+      if (showToast) {
+        showToast('Excel report generated successfully!', 'success');
+      }
+    } catch (error: any) {
+      console.error('Excel export failed:', error);
+      if (showToast) {
+        showToast('Unable to export Excel file. Please try again.', 'error');
+      }
+    } finally {
+      setIsExportingExcel(false);
     }
   };
 
@@ -1637,11 +2197,29 @@ function ReportsModule({ transactions, orders }: any) {
       className="space-y-8"
     >
       <div className="flex gap-4">
-        <button onClick={exportPDF} className="flex-1 bg-zinc-900 border border-zinc-800 p-4 rounded-2xl flex items-center justify-center gap-2 font-bold text-sm">
-          <Download className="w-4 h-4 text-red-500" /> Export PDF
+        <button 
+          onClick={exportPDF} 
+          disabled={isExportingPdf}
+          className="flex-1 bg-zinc-900 hover:bg-zinc-800 active:scale-98 border border-zinc-800 p-4 rounded-2xl flex items-center justify-center gap-2 font-bold text-sm transition-all disabled:opacity-50"
+        >
+          {isExportingPdf ? (
+            <RefreshCw className="w-4 h-4 text-red-500 animate-spin" />
+          ) : (
+            <Download className="w-4 h-4 text-red-500" />
+          )}
+          {isExportingPdf ? 'Exporting PDF...' : 'Export PDF'}
         </button>
-        <button onClick={exportExcel} className="flex-1 bg-zinc-900 border border-zinc-800 p-4 rounded-2xl flex items-center justify-center gap-2 font-bold text-sm">
-          <Download className="w-4 h-4 text-green-500" /> Export Excel
+        <button 
+          onClick={exportExcel} 
+          disabled={isExportingExcel}
+          className="flex-1 bg-zinc-900 hover:bg-zinc-800 active:scale-98 border border-zinc-800 p-4 rounded-2xl flex items-center justify-center gap-2 font-bold text-sm transition-all disabled:opacity-50"
+        >
+          {isExportingExcel ? (
+            <RefreshCw className="w-4 h-4 text-green-500 animate-spin" />
+          ) : (
+            <Download className="w-4 h-4 text-green-500" />
+          )}
+          {isExportingExcel ? 'Exporting Excel...' : 'Export Excel'}
         </button>
       </div>
 
@@ -1847,6 +2425,43 @@ function AdminModule({ apiLink, setApiLink, transactions, orders, showToast, isA
               <div className="bg-zinc-800/20 p-6 rounded-[28px] border border-zinc-800/50">
                 <p className="text-zinc-500 text-[10px] uppercase font-black tracking-wider mb-2">Storage Used</p>
                 <p className="text-2xl font-bold">~{(JSON.stringify(transactions).length / 1024).toFixed(1)} KB</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Android App & APK Download */}
+          <div className="pt-10 border-t border-zinc-800/50">
+            <h4 className="font-bold mb-4 text-sm flex items-center gap-2">
+              <Smartphone className="w-4 h-4 text-orange-500" />
+              Android Mobile App (APK)
+            </h4>
+            <div className="bg-gradient-to-br from-orange-500/10 via-zinc-900 to-zinc-900 border border-orange-500/30 p-6 rounded-[28px] space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-base text-white">KhataBook Pro APK</span>
+                    <span className="bg-orange-500/20 text-orange-400 border border-orange-500/30 text-[10px] font-bold px-2.5 py-0.5 rounded-full">v1.0 Ready</span>
+                  </div>
+                  <p className="text-xs text-zinc-400 mt-1">
+                    Install on any Android smartphone for offline ledger accounting & auto Google Sheets sync.
+                  </p>
+                </div>
+                <a
+                  href="/Khatabook.apk"
+                  download="Khatabook.apk"
+                  className="bg-orange-500 hover:bg-orange-600 active:scale-95 text-white font-bold text-sm px-6 py-3.5 rounded-2xl flex items-center justify-center gap-2 transition-all shadow-lg shadow-orange-500/25 shrink-0"
+                >
+                  <Download className="w-4 h-4" /> Download APK
+                </a>
+              </div>
+              <div className="bg-zinc-800/40 border border-zinc-700/40 rounded-2xl p-4 text-[11px] text-zinc-400 space-y-1.5">
+                <p className="font-bold text-zinc-300">How to install on Android:</p>
+                <ol className="list-decimal list-inside space-y-1 text-zinc-400">
+                  <li>Tap <span className="text-orange-400 font-semibold">Download APK</span> above on your phone or tablet.</li>
+                  <li>Tap the downloaded file in your browser or Notification shade.</li>
+                  <li>If prompted, enable <em>"Install unknown apps"</em> for your browser.</li>
+                  <li>Tap <strong>Install</strong> to start using Khatabook Pro on Android.</li>
+                </ol>
               </div>
             </div>
           </div>
