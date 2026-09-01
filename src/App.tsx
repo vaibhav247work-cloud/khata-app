@@ -46,7 +46,21 @@ import {
   deleteOrderWithAssociated,
   type SyncTrigger 
 } from './sync';
-import { format, startOfDay, endOfDay, startOfWeek, endOfWeek, startOfMonth, endOfMonth, isWithinInterval, parseISO } from 'date-fns';
+import { 
+  format, 
+  startOfDay, 
+  endOfDay, 
+  startOfWeek, 
+  endOfWeek, 
+  startOfMonth, 
+  endOfMonth, 
+  subDays,
+  subMonths,
+  startOfYear,
+  endOfYear,
+  isWithinInterval, 
+  parseISO 
+} from 'date-fns';
 import { 
   BarChart, 
   Bar, 
@@ -78,6 +92,9 @@ const LAST_SYNC_AT_KEY = 'BT_LAST_SYNC_AT';
 
 // --- Shared File, PDF & Native Share Utilities ---
 
+let cachedFontBase64: string | null = null;
+let fontLoadAttempted = false;
+
 const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
   const bytes = new Uint8Array(buffer);
   const chunkSize = 0x8000;
@@ -88,18 +105,62 @@ const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
   return window.btoa(binary);
 };
 
+const loadAppFont = async (doc: jsPDF): Promise<{ fontName: string, cur: string }> => {
+  if (cachedFontBase64) {
+    try {
+      doc.addFileToVFS('Nirmala.ttf', cachedFontBase64);
+      doc.addFont('Nirmala.ttf', 'Nirmala', 'normal');
+      doc.setFont('Nirmala');
+      return { fontName: 'Nirmala', cur: '₹' };
+    } catch {
+      return { fontName: 'helvetica', cur: 'Rs. ' };
+    }
+  }
+
+  if (fontLoadAttempted) {
+    return { fontName: 'helvetica', cur: 'Rs. ' };
+  }
+
+  fontLoadAttempted = true;
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 1200);
+    const res = await fetch('/fonts/Nirmala.ttf', { signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (res.ok) {
+      const buf = await res.arrayBuffer();
+      if (buf && buf.byteLength > 0) {
+        cachedFontBase64 = arrayBufferToBase64(buf);
+        doc.addFileToVFS('Nirmala.ttf', cachedFontBase64);
+        doc.addFont('Nirmala.ttf', 'Nirmala', 'normal');
+        doc.setFont('Nirmala');
+        return { fontName: 'Nirmala', cur: '₹' };
+      }
+    }
+  } catch (err) {
+    console.warn('Font quick load bypassed:', err);
+  }
+  return { fontName: 'helvetica', cur: 'Rs. ' };
+};
+
 const downloadBlobFallback = (blob: Blob, filename: string) => {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.style.display = 'none';
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => {
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }, 1000);
+  try {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      try {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch {}
+    }, 1000);
+  } catch (err) {
+    console.warn('Download fallback error:', err);
+  }
 };
 
 const saveOrShareReport = async (
@@ -115,99 +176,123 @@ const saveOrShareReport = async (
   // 1. Native Capacitor Android & iOS
   if (Capacitor.isNativePlatform()) {
     try {
-      // A. Save permanently to Documents directory on the device
+      // Step 1: Write directly to App Cache Directory (always permitted without runtime permission prompts)
+      let fileUri = '';
       try {
-        await Filesystem.writeFile({
+        const writeResult = await Filesystem.writeFile({
           path: filename,
           data: cleanBase64,
-          directory: Directory.Documents,
+          directory: Directory.Cache,
           recursive: true,
         });
-      } catch (docWriteErr) {
-        console.warn('Documents directory write bypassed:', docWriteErr);
+        
+        try {
+          const uriResult = await Filesystem.getUri({
+            directory: Directory.Cache,
+            path: filename,
+          });
+          fileUri = uriResult.uri || writeResult.uri || '';
+        } catch {
+          fileUri = writeResult.uri || '';
+        }
+      } catch (cacheErr) {
+        console.warn('Cache write error, attempting Data directory:', cacheErr);
+        try {
+          const dataWrite = await Filesystem.writeFile({
+            path: filename,
+            data: cleanBase64,
+            directory: Directory.Data,
+            recursive: true,
+          });
+          fileUri = dataWrite.uri || '';
+        } catch (dataErr) {
+          console.warn('Data directory write failed:', dataErr);
+        }
       }
 
-      // B. Save to Cache directory for share provider URI
-      const writeResult = await Filesystem.writeFile({
-        path: filename,
-        data: cleanBase64,
-        directory: Directory.Cache,
-        recursive: true,
-      });
-
-      const uriResult = await Filesystem.getUri({
-        directory: Directory.Cache,
-        path: filename,
-      });
-
-      const fileUri = uriResult.uri || writeResult.uri;
-
-      // C. Open Native Share sheet (for WhatsApp, Email, Wireless Print, etc.)
-      try {
-        await Share.share({
-          title: filename,
-          text: `KhataBook: ${filename}`,
-          files: [fileUri],
-          dialogTitle: `Share or Print ${filename}`,
-        });
-      } catch (shareErr: any) {
-        const errStr = String(shareErr?.message || '').toLowerCase();
-        if (!errStr.includes('cancel') && !errStr.includes('dismiss') && !errStr.includes('abort')) {
+      // Step 2: Open Native Android System Share & Print Dialog
+      if (fileUri) {
+        try {
+          await Share.share({
+            title: filename,
+            text: `KhataBook: ${filename}`,
+            files: [fileUri],
+            dialogTitle: `Share or Print ${filename}`,
+          });
+          return true;
+        } catch (shareErr: any) {
+          const errStr = String(shareErr?.message || '').toLowerCase();
+          if (errStr.includes('cancel') || errStr.includes('dismiss') || errStr.includes('abort') || errStr.includes('user cancelled')) {
+            return true;
+          }
+          // Fallback share with URL parameter
           try {
             await Share.share({
               title: filename,
               url: fileUri,
               dialogTitle: `Share ${filename}`,
             });
-          } catch {}
+            return true;
+          } catch (shareFallbackErr: any) {
+            console.warn('Share sheet fallback failed:', shareFallbackErr);
+          }
         }
       }
+
+      // Step 3: Optional permanent Documents save in background (never blocks or crashes UI)
+      try {
+        Filesystem.writeFile({
+          path: filename,
+          data: cleanBase64,
+          directory: Directory.Documents,
+          recursive: true,
+        }).catch(() => {});
+      } catch {}
+
       return true;
     } catch (err: any) {
       console.warn('Native file share/save error:', err);
-      const errMsg = String(err?.message || '').toLowerCase();
-      if (errMsg.includes('cancel') || errMsg.includes('dismiss') || errMsg.includes('abort')) {
-        return true;
-      }
       return false;
     }
   }
 
   // 2. Web / Mobile Browser
-  // First, ALWAYS download the file directly to the device Downloads folder
-  let blob: Blob;
-  if (rawArrayBuffer) {
-    blob = new Blob([rawArrayBuffer], { type: mimeType });
-  } else {
-    const byteCharacters = atob(cleanBase64);
-    const byteNumbers = new Array(byteCharacters.length);
-    for (let i = 0; i < byteCharacters.length; i++) {
-      byteNumbers[i] = byteCharacters.charCodeAt(i);
-    }
-    const byteArray = new Uint8Array(byteNumbers);
-    blob = new Blob([byteArray], { type: mimeType });
-  }
-
-  // Trigger device browser download
-  downloadBlobFallback(blob, filename);
-
-  // Next, if Mobile Web Share is supported, also prompt the share sheet
-  if (typeof navigator !== 'undefined' && navigator.share) {
-    try {
-      const file = new File([blob], filename, { type: mimeType });
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({
-          title: filename,
-          text: `KhataBook: ${filename}`,
-          files: [file],
-        });
+  try {
+    let blob: Blob;
+    if (rawArrayBuffer) {
+      blob = new Blob([rawArrayBuffer], { type: mimeType });
+    } else {
+      const byteCharacters = atob(cleanBase64);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
       }
-    } catch (webShareErr: any) {
-      // User cancelled share dialog or dismiss
+      const byteArray = new Uint8Array(byteNumbers);
+      blob = new Blob([byteArray], { type: mimeType });
     }
-  }
 
-  return true;
+    // Trigger device browser download
+    downloadBlobFallback(blob, filename);
+
+    // Next, if Mobile Web Share is supported, also prompt the share sheet
+    if (typeof navigator !== 'undefined' && navigator.share) {
+      try {
+        const file = new File([blob], filename, { type: mimeType });
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          await navigator.share({
+            title: filename,
+            text: `KhataBook: ${filename}`,
+            files: [file],
+          });
+        }
+      } catch {}
+    }
+
+    return true;
+  } catch (webErr) {
+    console.error('Web save/share error:', webErr);
+    return false;
+  }
 };
 
 const generateAndShareOrderReceipts = async (ordersList: Order[], showToast?: any): Promise<void> => {
@@ -224,32 +309,7 @@ const generateAndShareOrderReceipts = async (ordersList: Order[], showToast?: an
     });
     (doc as any).autoTable = (options: any) => autoTable(doc, options);
 
-    // Font loading for Hindi / Rupee symbol
-    let hasCustomFont = false;
-    try {
-      const fontUrls = ['/fonts/Nirmala.ttf', './fonts/Nirmala.ttf', 'fonts/Nirmala.ttf'];
-      for (const url of fontUrls) {
-        try {
-          const fontResponse = await fetch(url);
-          if (fontResponse.ok) {
-            const fontBuf = await fontResponse.arrayBuffer();
-            if (fontBuf && fontBuf.byteLength > 0) {
-              const fontBase64 = arrayBufferToBase64(fontBuf);
-              doc.addFileToVFS('Nirmala.ttf', fontBase64);
-              doc.addFont('Nirmala.ttf', 'Nirmala', 'normal');
-              doc.setFont('Nirmala');
-              hasCustomFont = true;
-              break;
-            }
-          }
-        } catch {}
-      }
-    } catch (fontErr) {
-      console.warn('Custom font load bypassed:', fontErr);
-    }
-
-    const activeFont = hasCustomFont ? 'Nirmala' : 'helvetica';
-    const cur = hasCustomFont ? '₹' : 'Rs. ';
+    const { fontName: activeFont, cur } = await loadAppFont(doc);
 
     const formatOrderDate = (value: string) => {
       try {
@@ -520,6 +580,179 @@ const generateAndShareOrderReceipts = async (ordersList: Order[], showToast?: an
     console.error('Order receipt generation/share error:', error);
     if (showToast) {
       showToast('Failed to generate order receipt. Please try again.', 'error');
+    }
+  }
+};
+
+const generateAndSharePassbookPDF = async (
+  passbookEntries: any[], 
+  periodLabel: string, 
+  typeFilter: string, 
+  showToast?: any
+): Promise<void> => {
+  if (!passbookEntries || passbookEntries.length === 0) {
+    if (showToast) showToast('No passbook records to print', 'info');
+    return;
+  }
+
+  try {
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4',
+    });
+    (doc as any).autoTable = (options: any) => autoTable(doc, options);
+
+    const { fontName: activeFont, cur } = await loadAppFont(doc);
+
+    const formatPassbookDate = (value: string) => {
+      try {
+        return format(parseISO(value), 'dd MMM yyyy, hh:mm a');
+      } catch {
+        return value || '-';
+      }
+    };
+
+    const nowStr = format(new Date(), 'dd MMM yyyy, hh:mm a');
+    const totalCredit = passbookEntries
+      .filter((t: any) => t.type === 'Credit')
+      .reduce((sum: number, t: any) => sum + (Number(t.amount) || 0), 0);
+    const totalDebit = passbookEntries
+      .filter((t: any) => t.type === 'Debit')
+      .reduce((sum: number, t: any) => sum + (Number(t.amount) || 0), 0);
+    
+    // Net balance of latest entry (passbookEntries is newest first)
+    const latestBalance = passbookEntries.length > 0 ? passbookEntries[0].runningBalance : 0;
+
+    // Header Banner
+    doc.setFillColor(24, 24, 27);
+    doc.roundedRect(10, 10, 190, 26, 3, 3, 'F');
+    
+    doc.setTextColor(255, 255, 255);
+    doc.setFont(activeFont);
+    doc.setFontSize(15);
+    doc.text('KhataBook Pro', 16, 20);
+
+    doc.setFontSize(9);
+    doc.setTextColor(249, 115, 22);
+    doc.text(`OFFICIAL PASSBOOK STATEMENT • ${periodLabel.toUpperCase()} (${passbookEntries.length} ENTRIES)`, 16, 28);
+
+    doc.setFontSize(8);
+    doc.setTextColor(212, 212, 216);
+    doc.text(`Generated: ${nowStr}`, 130, 24);
+
+    // 3 Stat Boxes at top
+    doc.setFillColor(240, 253, 244);
+    doc.roundedRect(10, 40, 60, 18, 3, 3, 'F');
+    doc.setFillColor(254, 242, 242);
+    doc.roundedRect(75, 40, 60, 18, 3, 3, 'F');
+    doc.setFillColor(244, 244, 245);
+    doc.roundedRect(140, 40, 60, 18, 3, 3, 'F');
+
+    doc.setFont(activeFont);
+    doc.setFontSize(7.5);
+    doc.setTextColor(22, 101, 52);
+    doc.text('TOTAL INFLOW (CREDIT)', 15, 46);
+    doc.setTextColor(185, 28, 28);
+    doc.text('TOTAL OUTFLOW (DEBIT)', 80, 46);
+    doc.setTextColor(113, 113, 122);
+    doc.text('CLOSING RUNNING BALANCE', 145, 46);
+
+    doc.setFontSize(9.5);
+    doc.setTextColor(22, 101, 52);
+    doc.text(`+${cur}${totalCredit.toLocaleString('en-IN')}`, 15, 54);
+    doc.setTextColor(185, 28, 28);
+    doc.text(`-${cur}${totalDebit.toLocaleString('en-IN')}`, 80, 54);
+    doc.setTextColor(24, 24, 27);
+    doc.text(`${cur}${latestBalance.toLocaleString('en-IN')}`, 145, 54);
+
+    // Table
+    const tableData = passbookEntries.map((item: any, idx: number) => {
+      const isCredit = item.type === 'Credit';
+      return [
+        String(idx + 1),
+        formatPassbookDate(item.date),
+        item.category || '-',
+        `${item.description || '-'}${item.payment_type ? ` [${item.payment_type}]` : ''}`,
+        !isCredit ? `${cur}${Number(item.amount || 0).toLocaleString('en-IN')}` : '-',
+        isCredit ? `${cur}${Number(item.amount || 0).toLocaleString('en-IN')}` : '-',
+        `${cur}${Number(item.runningBalance || 0).toLocaleString('en-IN')}`
+      ];
+    });
+
+    // Summary row
+    tableData.push([
+      '',
+      'TOTALS',
+      `${passbookEntries.length} Records`,
+      `Net Period: ${cur}${(totalCredit - totalDebit).toLocaleString('en-IN')}`,
+      `${cur}${totalDebit.toLocaleString('en-IN')}`,
+      `${cur}${totalCredit.toLocaleString('en-IN')}`,
+      `${cur}${latestBalance.toLocaleString('en-IN')}`
+    ]);
+
+    autoTable(doc, {
+      head: [['#', 'Date & Time', 'Particulars / Account', 'Description & Mode', 'Debit (-)', 'Credit (+)', 'Balance']],
+      body: tableData,
+      startY: 64,
+      theme: 'grid',
+      styles: {
+        font: activeFont,
+        fontSize: 7,
+        textColor: [39, 39, 42],
+        lineColor: [228, 228, 231],
+        lineWidth: 0.15,
+        cellPadding: 1.5,
+      },
+      headStyles: {
+        font: activeFont,
+        fillColor: [234, 88, 12],
+        textColor: [255, 255, 255],
+        lineColor: [194, 65, 12],
+        lineWidth: 0.15,
+        fontStyle: 'normal',
+      },
+      alternateRowStyles: { fillColor: [250, 250, 250] },
+      columnStyles: {
+        0: { cellWidth: 8, halign: 'center' },
+        1: { cellWidth: 30 },
+        2: { cellWidth: 28 },
+        3: { cellWidth: 'auto' },
+        4: { cellWidth: 22, halign: 'right' },
+        5: { cellWidth: 22, halign: 'right' },
+        6: { cellWidth: 24, halign: 'right' },
+      },
+      didDrawPage: (data) => {
+        doc.setFont(activeFont);
+        doc.setFontSize(7.5);
+        doc.setTextColor(113, 113, 122);
+        doc.text(`Page ${data.pageNumber} • KhataBook Mobile Pro Passbook`, 190, 288, { align: 'right' });
+      },
+    });
+
+    const filename = `Passbook_Statement_${periodLabel.replace(/[^a-zA-Z0-9]/g, '_')}_${format(new Date(), 'yyyyMMdd_HHmm')}.pdf`;
+    const pdfArrayBuffer = doc.output('arraybuffer');
+    const pdfBase64 = arrayBufferToBase64(pdfArrayBuffer);
+
+    const isHandled = await saveOrShareReport(
+      pdfBase64,
+      filename,
+      'application/pdf',
+      pdfArrayBuffer
+    );
+
+    if (!isHandled) {
+      const pdfBlob = new Blob([pdfArrayBuffer], { type: 'application/pdf' });
+      downloadBlobFallback(pdfBlob, filename);
+    }
+
+    if (showToast) {
+      showToast('Passbook statement saved & opened for print/share!', 'success');
+    }
+  } catch (error: any) {
+    console.error('Passbook PDF print error:', error);
+    if (showToast) {
+      showToast('Failed to generate Passbook statement. Please try again.', 'error');
     }
   }
 };
@@ -926,11 +1159,12 @@ export default function App() {
           {activeTab === 'Orders' && <OrdersModule orders={orders} onUpdate={() => loadData()} showToast={showToast} isAdmin={isAdmin} markSyncPending={markSyncPending} />}
           {activeTab === 'Passbook' && (
             <PassbookModule 
-              transactions={filteredTransactions} 
+              transactions={transactions} 
               filterDate={filterDate}
               setFilterDate={setFilterDate}
               customDateRange={customDateRange}
               setCustomDateRange={setCustomDateRange}
+              showToast={showToast}
             />
           )}
           {activeTab === 'Reports' && <ReportsModule transactions={transactions} orders={orders} showToast={showToast} />}
@@ -1117,13 +1351,122 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
   const [showAdd, setShowAdd] = useState(false);
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [isSelectionMode, setIsSelectionMode] = useState(false);
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
 
+  // Filter states
+  const [periodFilter, setPeriodFilter] = useState<'All' | 'Today' | 'This Week' | 'This Month' | 'Last Month' | 'Last 30 Days' | 'This Year' | 'Custom'>('All');
+  const [typeFilter, setTypeFilter] = useState<'All' | 'Credit' | 'Debit'>('All');
+  const [paymentModeFilter, setPaymentModeFilter] = useState<string>('All');
+  const [customRange, setCustomRange] = useState({ start: '', end: '' });
+
+  // Progressive Lazy Loading State (Virtual Pagination)
+  const PAGE_SIZE = 30;
+  const [displayLimit, setDisplayLimit] = useState(PAGE_SIZE);
+  const loadMoreSentinelRef = useRef<HTMLDivElement>(null);
+
+  // Reset pagination limit when any filter or query changes
+  useEffect(() => {
+    setDisplayLimit(PAGE_SIZE);
+  }, [searchQuery, periodFilter, typeFilter, paymentModeFilter, customRange]);
+
+  // Filter transactions
+  const filteredTransactions = useMemo(() => {
+    const q = searchQuery.toLowerCase().trim();
+    const now = new Date();
+
+    return transactions.filter((tx: Transaction) => {
+      // Search match
+      if (q) {
+        const matchDesc = (tx.description || '').toLowerCase().includes(q);
+        const matchCat = (tx.category || '').toLowerCase().includes(q);
+        const matchRef = (tx.reference || '').toLowerCase().includes(q);
+        const matchAmt = tx.amount ? tx.amount.toString().includes(q) : false;
+        if (!matchDesc && !matchCat && !matchRef && !matchAmt) return false;
+      }
+
+      // Type match
+      if (typeFilter !== 'All' && tx.type !== typeFilter) return false;
+
+      // Payment Mode match
+      if (paymentModeFilter !== 'All' && tx.payment_type !== paymentModeFilter) return false;
+
+      // Period match
+      if (periodFilter === 'All') return true;
+
+      try {
+        const txDate = parseISO(tx.date);
+        if (periodFilter === 'Today') {
+          return isWithinInterval(txDate, { start: startOfDay(now), end: endOfDay(now) });
+        }
+        if (periodFilter === 'This Week') {
+          return isWithinInterval(txDate, { start: startOfWeek(now), end: endOfWeek(now) });
+        }
+        if (periodFilter === 'This Month') {
+          return isWithinInterval(txDate, { start: startOfMonth(now), end: endOfMonth(now) });
+        }
+        if (periodFilter === 'Last Month') {
+          const lastMonth = subMonths(now, 1);
+          return isWithinInterval(txDate, { start: startOfMonth(lastMonth), end: endOfMonth(lastMonth) });
+        }
+        if (periodFilter === 'Last 30 Days') {
+          return isWithinInterval(txDate, { start: startOfDay(subDays(now, 30)), end: endOfDay(now) });
+        }
+        if (periodFilter === 'This Year') {
+          return isWithinInterval(txDate, { start: startOfYear(now), end: endOfYear(now) });
+        }
+        if (periodFilter === 'Custom' && customRange.start && customRange.end) {
+          return isWithinInterval(txDate, { 
+            start: startOfDay(parseISO(customRange.start)), 
+            end: endOfDay(parseISO(customRange.end)) 
+          });
+        }
+      } catch (e) {
+        return true;
+      }
+
+      return true;
+    });
+  }, [transactions, searchQuery, periodFilter, typeFilter, paymentModeFilter, customRange]);
+
+  // Sort filtered transactions descending by date
   const sortedTransactions = useMemo(() => {
-    return [...transactions].sort((a, b) => b.date.localeCompare(a.date));
-  }, [transactions]);
+    return [...filteredTransactions].sort((a, b) => b.date.localeCompare(a.date));
+  }, [filteredTransactions]);
+
+  // Slice visible batch for blazing fast DOM rendering
+  const visibleTransactions = useMemo(() => {
+    return sortedTransactions.slice(0, displayLimit);
+  }, [sortedTransactions, displayLimit]);
+
+  // Automatic Infinite Scroll Sentinel
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && displayLimit < sortedTransactions.length) {
+          setDisplayLimit((prev) => Math.min(prev + PAGE_SIZE, sortedTransactions.length));
+        }
+      },
+      { threshold: 0.1, rootMargin: '300px' }
+    );
+
+    const target = loadMoreSentinelRef.current;
+    if (target) observer.observe(target);
+    return () => {
+      if (target) observer.unobserve(target);
+    };
+  }, [displayLimit, sortedTransactions.length]);
+
+  // Summary of filtered set
+  const filteredStats = useMemo(() => {
+    const totalCredit = filteredTransactions
+      .filter((t: any) => t.type === 'Credit')
+      .reduce((sum: number, t: any) => sum + (Number(t.amount) || 0), 0);
+    const totalDebit = filteredTransactions
+      .filter((t: any) => t.type === 'Debit')
+      .reduce((sum: number, t: any) => sum + (Number(t.amount) || 0), 0);
+    return { totalCredit, totalDebit };
+  }, [filteredTransactions]);
 
   const selectedTransactions = useMemo(() => {
     return transactions.filter((t: any) => selectedIds.has(t.id));
@@ -1253,7 +1596,7 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
     <motion.div 
       initial={{ opacity: 0, x: 20 }}
       animate={{ opacity: 1, x: 0 }}
-      className="space-y-6"
+      className="space-y-4 sm:space-y-5"
     >
       {/* Top Search & Action Controls */}
       <div className="flex items-center gap-3">
@@ -1264,9 +1607,17 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
             type="text" 
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search transactions..."
-            className="w-full bg-zinc-900 border border-zinc-800 rounded-2xl pl-12 pr-4 py-4 text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+            placeholder="Search category, note, ref, amount..."
+            className="w-full bg-zinc-900 border border-zinc-800 rounded-2xl pl-12 pr-4 py-3.5 text-white focus:outline-none focus:ring-2 focus:ring-orange-500 text-sm"
           />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery('')}
+              className="absolute right-3.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 p-1"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
         </div>
 
         {sortedTransactions.length > 0 && (
@@ -1279,14 +1630,14 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
                 toggleSelectAll();
               }
             }}
-            title={selectedIds.size > 0 ? 'Clear Selection' : 'Select All Transactions'}
-            className={`p-4 rounded-2xl border transition-all flex items-center justify-center shrink-0 ${
+            title={selectedIds.size > 0 ? 'Clear Selection' : 'Select All Filtered Transactions'}
+            className={`p-3.5 rounded-2xl border transition-all flex items-center justify-center shrink-0 ${
               selectedIds.size > 0 
                 ? 'bg-orange-500/20 border-orange-500 text-orange-400 shadow-lg shadow-orange-500/20' 
                 : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-700'
             }`}
           >
-            <ListChecks className="w-6 h-6" />
+            <ListChecks className="w-5 h-5" />
           </button>
         )}
 
@@ -1296,11 +1647,125 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
             setEditingTransaction(null);
             setShowAdd(true);
           }}
-          className="bg-orange-500 hover:bg-orange-600 p-4 rounded-2xl text-white shadow-lg shadow-orange-500/20 active:scale-95 transition-all shrink-0"
+          className="bg-orange-500 hover:bg-orange-600 p-3.5 rounded-2xl text-white shadow-lg shadow-orange-500/20 active:scale-95 transition-all shrink-0 flex items-center gap-1.5 font-bold text-sm"
           title="Add Transaction"
         >
-          <Plus className="w-6 h-6" />
+          <Plus className="w-5 h-5" />
+          <span className="hidden sm:inline">Add Entry</span>
         </button>
+      </div>
+
+      {/* Filter Chips Toolbar */}
+      <div className="space-y-2.5 bg-zinc-900/60 border border-zinc-800/80 rounded-2xl p-3">
+        {/* Period Filters */}
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar text-xs">
+          {(['All', 'This Month', 'Last Month', 'Last 30 Days', 'This Year', 'Today', 'Custom'] as const).map((period) => (
+            <button
+              key={period}
+              type="button"
+              onClick={() => setPeriodFilter(period)}
+              className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition-all text-xs ${
+                periodFilter === period
+                  ? 'bg-orange-500 text-white shadow-sm'
+                  : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
+              }`}
+            >
+              {period}
+            </button>
+          ))}
+        </div>
+
+        {/* Custom Date Range Picker */}
+        {periodFilter === 'Custom' && (
+          <div className="grid grid-cols-2 gap-2 pt-1">
+            <div>
+              <label className="block text-[10px] text-zinc-500 uppercase font-bold mb-1">From Date</label>
+              <input
+                type="date"
+                value={customRange.start}
+                onChange={(e) => setCustomRange(prev => ({ ...prev, start: e.target.value }))}
+                className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-1.5 text-xs text-white"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] text-zinc-500 uppercase font-bold mb-1">To Date</label>
+              <input
+                type="date"
+                value={customRange.end}
+                onChange={(e) => setCustomRange(prev => ({ ...prev, end: e.target.value }))}
+                className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-1.5 text-xs text-white"
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Type & Payment Mode Sub-Filters */}
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-zinc-800/60 text-xs">
+          {/* Type Filter */}
+          <div className="flex items-center gap-1">
+            {(['All', 'Credit', 'Debit'] as const).map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setTypeFilter(t)}
+                className={`px-2.5 py-1 rounded-lg font-bold text-[11px] transition-colors ${
+                  typeFilter === t
+                    ? t === 'Credit'
+                      ? 'bg-green-500/20 text-green-400 border border-green-500/30'
+                      : t === 'Debit'
+                      ? 'bg-red-500/20 text-red-400 border border-red-500/30'
+                      : 'bg-zinc-700 text-white'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                {t === 'All' ? 'All Types' : t === 'Credit' ? '+ Income' : '- Expense'}
+              </button>
+            ))}
+          </div>
+
+          {/* Payment Mode Selector */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] uppercase font-bold text-zinc-500">Mode:</span>
+            <select
+              value={paymentModeFilter}
+              onChange={(e) => setPaymentModeFilter(e.target.value)}
+              className="bg-zinc-800 border border-zinc-700 text-zinc-300 text-[11px] rounded-lg px-2 py-1 focus:outline-none"
+            >
+              <option value="All">All Modes</option>
+              {PAYMENT_TYPES.map((p) => (
+                <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {/* Dataset Summary & Active Filter Indicator */}
+      <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-xs text-zinc-400">
+        <div className="flex items-center gap-2">
+          <span>
+            Showing <strong className="text-zinc-200">{visibleTransactions.length}</strong> of{' '}
+            <strong className="text-zinc-200">{sortedTransactions.length}</strong> transactions
+          </span>
+          {sortedTransactions.length !== transactions.length && (
+            <span className="text-[11px] text-orange-400 bg-orange-500/10 px-2 py-0.5 rounded-md">
+              (Filtered from {transactions.length} total)
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-3 text-[11px]">
+          {filteredStats.totalCredit > 0 && (
+            <span className="text-green-400 font-bold">
+              +₹{filteredStats.totalCredit.toLocaleString('en-IN')}
+            </span>
+          )}
+          {filteredStats.totalDebit > 0 && (
+            <span className="text-red-400 font-bold">
+              -₹{filteredStats.totalDebit.toLocaleString('en-IN')}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Multi-Select Action Toolbar - Autohidden if none selected */}
@@ -1328,7 +1793,7 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
                   ) : (
                     <>
                       <Square className="w-3.5 h-3.5 text-zinc-400" />
-                      Select All ({sortedTransactions.length})
+                      Select All Filtered ({sortedTransactions.length})
                     </>
                   )}
                 </button>
@@ -1364,12 +1829,12 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
               <span>Selected totals:</span>
               {selectedCreditTotal > 0 && (
                 <span className="text-green-400 font-bold bg-green-500/10 px-2 py-0.5 rounded-md border border-green-500/20">
-                  Credit: +₹{selectedCreditTotal.toLocaleString()}
+                  Credit: +₹{selectedCreditTotal.toLocaleString('en-IN')}
                 </span>
               )}
               {selectedDebitTotal > 0 && (
                 <span className="text-red-400 font-bold bg-red-500/10 px-2 py-0.5 rounded-md border border-red-500/20">
-                  Debit: -₹{selectedDebitTotal.toLocaleString()}
+                  Debit: -₹{selectedDebitTotal.toLocaleString('en-IN')}
                 </span>
               )}
             </div>
@@ -1377,9 +1842,9 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
         )}
       </AnimatePresence>
 
-      {/* Transactions List */}
+      {/* Transactions List (Progressive Lazy Rendered) */}
       <div className="space-y-3">
-        {sortedTransactions.map((tx: any) => {
+        {visibleTransactions.map((tx: any) => {
           const isSelected = selectedIds.has(tx.id);
 
           return (
@@ -1433,7 +1898,7 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
 
               <div className="text-right shrink-0">
                 <p className={`text-base sm:text-lg font-extrabold tracking-tight ${tx.type === 'Credit' ? 'text-green-500' : 'text-red-500'}`}>
-                  {tx.type === 'Credit' ? '+' : '-'}₹{Number(tx.amount || 0).toLocaleString()}
+                  {tx.type === 'Credit' ? '+' : '-'}₹{Number(tx.amount || 0).toLocaleString('en-IN')}
                 </p>
                 {tx.reference && <p className="text-zinc-500 text-[10px] truncate max-w-[110px] mt-0.5">Ref: {tx.reference}</p>}
                 
@@ -1456,13 +1921,36 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
           );
         })}
 
-        {transactions.length === 0 && (
-          <div className="text-center py-20 bg-zinc-900/50 border border-zinc-800 border-dashed rounded-[40px]">
-            <div className="w-16 h-16 bg-zinc-800 rounded-2xl flex items-center justify-center mx-auto mb-4">
-              <RefreshCw className="text-zinc-600 w-8 h-8" />
+        {/* Progressive Load More Sentinel & Buttons */}
+        {displayLimit < sortedTransactions.length && (
+          <div className="pt-3 pb-2 flex flex-col sm:flex-row items-center justify-center gap-3">
+            <button
+              type="button"
+              onClick={() => setDisplayLimit((prev) => Math.min(prev + PAGE_SIZE, sortedTransactions.length))}
+              className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 text-xs font-bold transition-all shadow-sm flex items-center justify-center gap-2"
+            >
+              <span>Load More (+{Math.min(PAGE_SIZE, sortedTransactions.length - displayLimit)} remaining)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setDisplayLimit(sortedTransactions.length)}
+              className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 text-xs font-medium transition-colors"
+            >
+              Show All ({sortedTransactions.length})
+            </button>
+          </div>
+        )}
+
+        {/* Intersection Sentinel element */}
+        <div ref={loadMoreSentinelRef} className="h-4" />
+
+        {sortedTransactions.length === 0 && (
+          <div className="text-center py-16 bg-zinc-900/50 border border-zinc-800 border-dashed rounded-[32px]">
+            <div className="w-14 h-14 bg-zinc-800 rounded-2xl flex items-center justify-center mx-auto mb-3">
+              <RefreshCw className="text-zinc-600 w-7 h-7" />
             </div>
-            <p className="text-zinc-500 font-medium">No transactions found</p>
-            <p className="text-zinc-600 text-xs mt-1">Tap the + button to add your first entry</p>
+            <p className="text-zinc-400 font-medium text-sm">No transactions match your criteria</p>
+            <p className="text-zinc-600 text-xs mt-1">Try clearing your search or date filter</p>
           </div>
         )}
       </div>
@@ -1503,13 +1991,13 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
                 {selectedDebitTotal > 0 && (
                   <div className="flex justify-between text-red-400">
                     <span>Total Expense (Debit):</span>
-                    <span className="font-bold">-₹{selectedDebitTotal.toLocaleString()}</span>
+                    <span className="font-bold">-₹{selectedDebitTotal.toLocaleString('en-IN')}</span>
                   </div>
                 )}
                 {selectedCreditTotal > 0 && (
                   <div className="flex justify-between text-green-400">
                     <span>Total Income (Credit):</span>
-                    <span className="font-bold">+₹{selectedCreditTotal.toLocaleString()}</span>
+                    <span className="font-bold">+₹{selectedCreditTotal.toLocaleString('en-IN')}</span>
                   </div>
                 )}
               </div>
@@ -2874,110 +3362,335 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending }:
   );
 }
 
-function PassbookModule({ transactions, filterDate, setFilterDate, customDateRange, setCustomDateRange }: any) {
+function PassbookModule({ transactions, filterDate, setFilterDate, customDateRange, setCustomDateRange, showToast }: any) {
   const [typeFilter, setTypeFilter] = useState<'All' | 'Credit' | 'Debit'>('All');
+  const [passbookSearch, setPassbookSearch] = useState('');
+  const [isPrinting, setIsPrinting] = useState(false);
 
-  // Calculate running balance for the chronological list
-  const passbookData = useMemo(() => {
-    // Sort by date ascending to calculate balance
+  // 1. Calculate running balance from the beginning chronologically
+  const allWithBalance = useMemo(() => {
+    // Sort by date ascending to calculate accurate running balance from beginning
     const sorted = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
     let balance = 0;
-    const withBalance = sorted.map(tx => {
-      if (tx.type === 'Credit') balance += tx.amount;
-      else balance -= tx.amount;
+    return sorted.map(tx => {
+      if (tx.type === 'Credit') balance += Number(tx.amount || 0);
+      else balance -= Number(tx.amount || 0);
       return { ...tx, runningBalance: balance };
     });
+  }, [transactions]);
 
-    // Apply type filter after balance calculation to maintain correct running balance
-    const filtered = typeFilter === 'All' 
-      ? withBalance 
-      : withBalance.filter(tx => tx.type === typeFilter);
+  // 2. Filter passbook items based on selected Date Range
+  const dateFilteredData = useMemo(() => {
+    if (filterDate === 'All') return allWithBalance;
 
-    return filtered.reverse(); // Show newest first
-  }, [transactions, typeFilter]);
+    const now = new Date();
+    return allWithBalance.filter(tx => {
+      try {
+        const txDate = parseISO(tx.date);
+        if (filterDate === 'Today') {
+          return isWithinInterval(txDate, { start: startOfDay(now), end: endOfDay(now) });
+        }
+        if (filterDate === 'This Week') {
+          return isWithinInterval(txDate, { start: startOfWeek(now), end: endOfWeek(now) });
+        }
+        if (filterDate === 'This Month') {
+          return isWithinInterval(txDate, { start: startOfMonth(now), end: endOfMonth(now) });
+        }
+        if (filterDate === 'Custom' && customDateRange?.start && customDateRange?.end) {
+          return isWithinInterval(txDate, {
+            start: startOfDay(parseISO(customDateRange.start)),
+            end: endOfDay(parseISO(customDateRange.end))
+          });
+        }
+        return true;
+      } catch {
+        return true;
+      }
+    });
+  }, [allWithBalance, filterDate, customDateRange]);
+
+  // 3. Filter passbook items based on type filter and search query
+  const passbookData = useMemo(() => {
+    let filtered = dateFilteredData;
+
+    if (typeFilter !== 'All') {
+      filtered = filtered.filter(tx => tx.type === typeFilter);
+    }
+
+    if (passbookSearch.trim()) {
+      const q = passbookSearch.toLowerCase().trim();
+      filtered = filtered.filter(tx => 
+        (tx.category || '').toLowerCase().includes(q) ||
+        (tx.description || '').toLowerCase().includes(q) ||
+        (tx.reference || '').toLowerCase().includes(q) ||
+        (tx.payment_type || '').toLowerCase().includes(q) ||
+        String(tx.amount || '').includes(q)
+      );
+    }
+
+    return [...filtered].reverse(); // Show newest first
+  }, [dateFilteredData, typeFilter, passbookSearch]);
+
+  // Derive Period Label
+  const periodLabel = useMemo(() => {
+    if (filterDate === 'Custom') {
+      if (customDateRange?.start && customDateRange?.end) {
+        return `${format(parseISO(customDateRange.start), 'dd MMM yyyy')} to ${format(parseISO(customDateRange.end), 'dd MMM yyyy')}`;
+      }
+      return 'Custom Range';
+    }
+    if (filterDate === 'All') return 'All Time';
+    return filterDate;
+  }, [filterDate, customDateRange]);
+
+  // Calculate summary metrics for current filtered passbook view
+  const totalCredit = useMemo(() => {
+    return passbookData.filter(t => t.type === 'Credit').reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+  }, [passbookData]);
+
+  const totalDebit = useMemo(() => {
+    return passbookData.filter(t => t.type === 'Debit').reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+  }, [passbookData]);
+
+  const latestRunningBalance = useMemo(() => {
+    return passbookData.length > 0 ? passbookData[0].runningBalance : 0;
+  }, [passbookData]);
+
+  const handlePrintPassbook = async () => {
+    if (isPrinting || passbookData.length === 0) return;
+    setIsPrinting(true);
+    try {
+      await generateAndSharePassbookPDF(passbookData, periodLabel, typeFilter, showToast);
+    } catch (err) {
+      console.error('Print passbook error:', err);
+      if (showToast) showToast('Failed to print passbook statement', 'error');
+    } finally {
+      setIsPrinting(false);
+    }
+  };
 
   return (
     <motion.div 
       initial={{ opacity: 0, x: 20 }}
       animate={{ opacity: 1, x: 0 }}
-      className="space-y-6"
+      className="space-y-4 sm:space-y-5"
     >
-      <div className="space-y-4">
-        <div className="flex flex-wrap gap-2">
+      {/* Top Search & Inline Print Action Header */}
+      <div className="flex items-center gap-2 sm:gap-3">
+        <div className="relative flex-1">
+          <Search className="absolute left-3.5 sm:left-4 top-1/2 -translate-y-1/2 text-zinc-500 w-4 h-4 sm:w-5 sm:h-5 pointer-events-none" />
+          <input 
+            id="passbook-search-input"
+            type="text" 
+            value={passbookSearch}
+            onChange={(e) => setPassbookSearch(e.target.value)}
+            placeholder="Search passbook..." 
+            className="w-full bg-zinc-900 border border-zinc-800 rounded-2xl pl-10 sm:pl-12 pr-9 sm:pr-10 py-3 sm:py-3.5 text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-orange-500 text-xs sm:text-sm"
+          />
+          {passbookSearch && (
+            <button
+              id="clear-passbook-search-btn"
+              type="button"
+              onClick={() => setPassbookSearch('')}
+              className="absolute right-3 top-1/2 -translate-y-1/2 p-1 rounded-lg text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors"
+              title="Clear search"
+            >
+              <X className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+            </button>
+          )}
+        </div>
+
+        {/* Compact Print Button on Mobile, Expanded on Desktop */}
+        <button
+          id="print-passbook-statement-btn"
+          type="button"
+          onClick={handlePrintPassbook}
+          disabled={isPrinting || passbookData.length === 0}
+          title={`Print Passbook (${periodLabel})`}
+          className="h-11 sm:h-12 px-3.5 sm:px-5 bg-orange-500 hover:bg-orange-600 disabled:bg-zinc-900 border border-orange-500/30 disabled:border-zinc-800 text-white disabled:text-zinc-600 rounded-2xl transition-all shadow-md shadow-orange-500/20 disabled:shadow-none flex items-center justify-center gap-2 text-xs sm:text-sm font-bold shrink-0 disabled:cursor-not-allowed active:scale-95"
+        >
+          {isPrinting ? (
+            <RefreshCw className="w-4 h-4 sm:w-5 sm:h-5 animate-spin text-white" />
+          ) : (
+            <Printer className="w-4 h-4 sm:w-5 sm:h-5" />
+          )}
+          <span className="hidden sm:inline">Print Passbook</span>
+        </button>
+      </div>
+
+      {/* Date Period Filter Pills */}
+      <div className="space-y-2.5">
+        <div className="flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar pb-1 -mx-1 px-1">
           {['All', 'Today', 'This Week', 'This Month', 'Custom'].map((f) => (
             <button 
               key={f}
+              id={`passbook-filter-date-${f.toLowerCase().replace(/\s+/g, '-')}`}
               onClick={() => setFilterDate(f as any)}
-              className={`px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider transition-all ${
-                filterDate === f ? 'bg-orange-500 text-white' : 'bg-zinc-900 text-zinc-500 border border-zinc-800'
+              className={`px-3 sm:px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-all ${
+                filterDate === f ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800'
               }`}
             >
-              {f}
+              {f === 'All' ? 'All Time' : f}
             </button>
           ))}
         </div>
 
+        {/* Credit / Debit Type Tabs */}
         <div className="flex gap-2">
           {['All', 'Credit', 'Debit'].map((t) => (
             <button 
               key={t}
+              id={`passbook-filter-type-${t.toLowerCase()}`}
               onClick={() => setTypeFilter(t as any)}
-              className={`flex-1 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all ${
+              className={`flex-1 py-2 sm:py-2.5 rounded-xl text-[11px] sm:text-xs font-bold uppercase tracking-wider transition-all ${
                 typeFilter === t 
-                  ? t === 'Credit' ? 'bg-green-500 text-white' : t === 'Debit' ? 'bg-red-500 text-white' : 'bg-zinc-700 text-white'
-                  : 'bg-zinc-900 text-zinc-500 border border-zinc-800'
+                  ? t === 'Credit' 
+                    ? 'bg-green-500 text-white shadow-md shadow-green-500/20' 
+                    : t === 'Debit' 
+                    ? 'bg-red-500 text-white shadow-md shadow-red-500/20' 
+                    : 'bg-zinc-700 text-white'
+                  : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800'
               }`}
             >
-              {t}
+              {t === 'Credit' ? 'Income (Credit)' : t === 'Debit' ? 'Expense (Debit)' : 'All Types'}
             </button>
           ))}
         </div>
       </div>
 
       {filterDate === 'Custom' && (
-        <div className="grid grid-cols-2 gap-4 bg-zinc-900 p-4 rounded-2xl border border-zinc-800">
-          <input 
-            type="date" 
-            value={customDateRange.start} 
-            onChange={(e) => setCustomDateRange({ ...customDateRange, start: e.target.value })}
-            className="bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-xs"
-          />
-          <input 
-            type="date" 
-            value={customDateRange.end} 
-            onChange={(e) => setCustomDateRange({ ...customDateRange, end: e.target.value })}
-            className="bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-xs"
-          />
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-zinc-900 p-4 rounded-2xl border border-zinc-800">
+          <div>
+            <label className="block text-[10px] font-bold text-zinc-500 uppercase mb-1">From Date</label>
+            <input 
+              type="date" 
+              value={customDateRange.start} 
+              onChange={(e) => setCustomDateRange({ ...customDateRange, start: e.target.value })}
+              className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-orange-500"
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] font-bold text-zinc-500 uppercase mb-1">To Date</label>
+            <input 
+              type="date" 
+              value={customDateRange.end} 
+              onChange={(e) => setCustomDateRange({ ...customDateRange, end: e.target.value })}
+              className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-orange-500"
+            />
+          </div>
         </div>
       )}
 
-      <div className="bg-zinc-900 border border-zinc-800 rounded-[32px] overflow-hidden">
-        <div className="grid grid-cols-4 bg-zinc-800/50 p-4 text-[10px] font-bold uppercase tracking-widest text-zinc-500 border-b border-zinc-800">
-          <span>Date</span>
-          <span>Description</span>
-          <span className="text-right">Credit/Debit</span>
-          <span className="text-right">Balance</span>
+      {/* Financial Summary 3-Column Indicator (Mobile-Optimized) */}
+      <div className="grid grid-cols-3 gap-2 sm:gap-3 bg-zinc-900 border border-zinc-800 rounded-2xl p-3 sm:p-4 shadow-sm">
+        <div className="flex flex-col min-w-0">
+          <span className="text-zinc-500 text-[9px] sm:text-[11px] font-bold uppercase tracking-wider truncate">Income</span>
+          <span className="text-xs sm:text-base md:text-lg font-bold text-green-400 mt-0.5 truncate">
+            +₹{totalCredit.toLocaleString('en-IN')}
+          </span>
         </div>
-        <div className="divide-y divide-zinc-800">
-          {passbookData.map((item) => (
-            <div key={item.id} className="grid grid-cols-4 p-4 items-center">
-              <span className="text-[10px] text-zinc-500">{format(parseISO(item.date), 'dd MMM')}</span>
-              <div className="flex flex-col">
-                <span className="text-xs font-bold truncate">{item.category}</span>
-                <span className="text-[9px] text-zinc-600 truncate">{item.description}</span>
+
+        <div className="flex flex-col min-w-0 border-l border-zinc-800 pl-2 sm:pl-3">
+          <span className="text-zinc-500 text-[9px] sm:text-[11px] font-bold uppercase tracking-wider truncate">Expense</span>
+          <span className="text-xs sm:text-base md:text-lg font-bold text-red-400 mt-0.5 truncate">
+            -₹{totalDebit.toLocaleString('en-IN')}
+          </span>
+        </div>
+
+        <div className="flex flex-col min-w-0 border-l border-zinc-800 pl-2 sm:pl-3">
+          <span className="text-zinc-500 text-[9px] sm:text-[11px] font-bold uppercase tracking-wider truncate">Net Balance</span>
+          <span className={`text-xs sm:text-base md:text-lg font-bold mt-0.5 truncate ${latestRunningBalance >= 0 ? 'text-zinc-100' : 'text-red-400'}`}>
+            ₹{latestRunningBalance.toLocaleString('en-IN')}
+          </span>
+        </div>
+      </div>
+
+      {/* Passbook Table / Card List */}
+      <div className="bg-zinc-900 border border-zinc-800 rounded-[32px] overflow-hidden shadow-sm">
+        <div className="grid grid-cols-12 bg-zinc-800/60 p-4 text-[10px] font-bold uppercase tracking-widest text-zinc-400 border-b border-zinc-800">
+          <span className="col-span-3 sm:col-span-2">Date</span>
+          <span className="col-span-5 sm:col-span-4">Particulars</span>
+          <span className="hidden sm:block sm:col-span-2 text-center">Mode</span>
+          <span className="col-span-4 sm:col-span-2 text-right">Amount</span>
+          <span className="hidden sm:block sm:col-span-2 text-right">Balance</span>
+        </div>
+
+        <div className="divide-y divide-zinc-800/70">
+          {passbookData.map((item) => {
+            const isCredit = item.type === 'Credit';
+            return (
+              <div key={item.id} className="grid grid-cols-12 p-4 items-center hover:bg-zinc-850/40 transition-colors">
+                {/* Date */}
+                <div className="col-span-3 sm:col-span-2 flex flex-col">
+                  <span className="text-xs font-bold text-zinc-300">{format(parseISO(item.date), 'dd MMM')}</span>
+                  <span className="text-[10px] text-zinc-500">{format(parseISO(item.date), 'yyyy, hh:mm a')}</span>
+                </div>
+
+                {/* Particulars */}
+                <div className="col-span-5 sm:col-span-4 flex flex-col min-w-0 pr-2">
+                  <span className="text-xs font-bold text-white truncate">{item.category}</span>
+                  <span className="text-[11px] text-zinc-400 truncate">{item.description}</span>
+                  {item.reference && (
+                    <span className="text-[10px] text-zinc-500 truncate">Ref: {item.reference}</span>
+                  )}
+                  {/* Mobile payment mode display */}
+                  <span className="text-[10px] text-orange-400 sm:hidden mt-0.5">{item.payment_type}</span>
+                </div>
+
+                {/* Mode (Desktop) */}
+                <div className="hidden sm:flex sm:col-span-2 items-center justify-center">
+                  <span className="px-2.5 py-1 rounded-lg bg-zinc-800 text-zinc-300 text-[11px] font-semibold border border-zinc-700/60">
+                    {item.payment_type || 'Cash'}
+                  </span>
+                </div>
+
+                {/* Amount */}
+                <div className="col-span-4 sm:col-span-2 text-right flex flex-col items-end">
+                  <span className={`text-xs sm:text-sm font-bold ${isCredit ? 'text-green-400' : 'text-red-400'}`}>
+                    {isCredit ? '+' : '-'}₹{(Number(item.amount) || 0).toLocaleString('en-IN')}
+                  </span>
+                  {/* Mobile Running Balance */}
+                  <span className="text-[10px] text-zinc-500 sm:hidden">
+                    Bal: ₹{(Number(item.runningBalance) || 0).toLocaleString('en-IN')}
+                  </span>
+                </div>
+
+                {/* Running Balance (Desktop) */}
+                <div className="hidden sm:block sm:col-span-2 text-right">
+                  <span className="text-xs sm:text-sm font-bold text-zinc-200">
+                    ₹{(Number(item.runningBalance) || 0).toLocaleString('en-IN')}
+                  </span>
+                </div>
               </div>
-              <div className="text-right">
-                <span className={`text-xs font-bold ${item.type === 'Credit' ? 'text-green-500' : 'text-red-500'}`}>
-                  {item.type === 'Credit' ? '+' : '-'}₹{item.amount.toLocaleString()}
-                </span>
-              </div>
-              <div className="text-right">
-                <span className="text-xs font-bold text-zinc-300">₹{item.runningBalance.toLocaleString()}</span>
-              </div>
-            </div>
-          ))}
+            );
+          })}
+
           {passbookData.length === 0 && (
-            <div className="p-12 text-center text-zinc-600">No records found for this period</div>
+            <div className="p-12 text-center space-y-3">
+              <div className="w-12 h-12 bg-zinc-800 rounded-2xl flex items-center justify-center mx-auto text-zinc-500">
+                <Search className="w-6 h-6" />
+              </div>
+              <p className="text-zinc-400 font-bold text-sm">
+                {passbookSearch || typeFilter !== 'All' ? 'No matching passbook entries' : 'No records found for this period'}
+              </p>
+              <p className="text-zinc-600 text-xs max-w-xs mx-auto">
+                {passbookSearch ? `No records matched "${passbookSearch}".` : 'Try changing the date filter or entry type.'}
+              </p>
+              {(passbookSearch || typeFilter !== 'All' || filterDate !== 'All') && (
+                <button
+                  id="reset-passbook-filters-btn"
+                  type="button"
+                  onClick={() => {
+                    setPassbookSearch('');
+                    setTypeFilter('All');
+                    setFilterDate('All');
+                  }}
+                  className="text-xs font-bold text-orange-400 hover:text-orange-300 underline"
+                >
+                  Reset all filters
+                </button>
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -3024,34 +3737,7 @@ function ReportsModule({ transactions, orders, showToast }: any) {
       const doc = new jsPDF();
       (doc as any).autoTable = (options: any) => autoTable(doc, options);
 
-      // Attempt to load Nirmala.ttf safely without crashing if offline or missing
-      let hasCustomFont = false;
-      try {
-        const fontUrls = ['/fonts/Nirmala.ttf', './fonts/Nirmala.ttf', 'fonts/Nirmala.ttf'];
-        for (const url of fontUrls) {
-          try {
-            const fontResponse = await fetch(url);
-            if (fontResponse.ok) {
-              const fontBuf = await fontResponse.arrayBuffer();
-              if (fontBuf && fontBuf.byteLength > 0) {
-                const fontBase64 = arrayBufferToBase64(fontBuf);
-                doc.addFileToVFS('Nirmala.ttf', fontBase64);
-                doc.addFont('Nirmala.ttf', 'Nirmala', 'normal');
-                doc.setFont('Nirmala');
-                hasCustomFont = true;
-                break;
-              }
-            }
-          } catch {
-            // Next URL
-          }
-        }
-      } catch (fontErr) {
-        console.warn('Custom font load bypassed, falling back to standard font:', fontErr);
-      }
-
-      const activeFont = hasCustomFont ? 'Nirmala' : 'helvetica';
-      const cur = hasCustomFont ? '₹' : 'Rs. ';
+      const { fontName: activeFont, cur } = await loadAppFont(doc);
 
       const formatReportDate = (value: string) => {
         try {
