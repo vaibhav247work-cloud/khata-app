@@ -41,10 +41,17 @@ export interface OrderPayment {
   synced: boolean;
 }
 
+export interface DeletedRecord {
+  id: string;
+  sheet: 'Transactions' | 'Orders' | 'OrderPayments';
+  date: string;
+}
+
 export class BuildTrackDB extends Dexie {
   transactions!: Table<Transaction>;
   orders!: Table<Order>;
   orderPayments!: Table<OrderPayment>;
+  deletedRecords!: Table<DeletedRecord>;
 
   constructor() {
     super('BuildTrackDB');
@@ -52,6 +59,12 @@ export class BuildTrackDB extends Dexie {
       transactions: 'id, date, type, category, payment_type, synced, order_id',
       orders: 'order_id, supplier, status, date, synced',
       orderPayments: 'payment_id, order_id, date, synced'
+    });
+    this.version(3).stores({
+      transactions: 'id, date, type, category, payment_type, synced, order_id',
+      orders: 'order_id, supplier, status, date, synced',
+      orderPayments: 'payment_id, order_id, date, synced',
+      deletedRecords: 'id, sheet, date'
     });
   }
 }

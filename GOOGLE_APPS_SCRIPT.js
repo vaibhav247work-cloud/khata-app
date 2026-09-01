@@ -206,6 +206,41 @@ function upsertRows_(sheet, headers, data, keyHeader) {
   return { inserted: inserted, updated: updated, duplicatesRemoved: duplicateRows.length };
 }
 
+function deleteRowsByKey_(sheet, headers, keyHeader, keysToDelete) {
+  if (!keysToDelete || keysToDelete.length === 0) {
+    return { deleted: 0 };
+  }
+  var keyIndex = headers.indexOf(keyHeader);
+  var lastRow = sheet.getLastRow();
+  if (lastRow <= 1) {
+    return { deleted: 0 };
+  }
+
+  var deleteSet = {};
+  keysToDelete.forEach(function(k) {
+    if (k !== undefined && k !== null && String(k).trim() !== "") {
+      deleteSet[String(k).trim()] = true;
+    }
+  });
+
+  var values = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+  var rowsToDelete = [];
+
+  values.forEach(function(row, index) {
+    var key = String(row[keyIndex] || "").trim();
+    if (key && deleteSet[key]) {
+      rowsToDelete.push(index + 2); // 1-indexed, header is row 1
+    }
+  });
+
+  // Delete rows from bottom to top so index shifts don't affect row numbers
+  rowsToDelete.sort(function(a, b) { return b - a; }).forEach(function(rowNum) {
+    sheet.deleteRow(rowNum);
+  });
+
+  return { deleted: rowsToDelete.length };
+}
+
 function doGet(e) {
   const request = e || {};
   const params = request.parameter || {};
@@ -271,6 +306,47 @@ function doPost(e) {
     });
   }
 
+  if (action === "delete") {
+    if (!sheetName) {
+      return jsonResponse_({ error: "Sheet name is required" });
+    }
+
+    const headers = getSheetHeaders_(sheetName);
+    if (!headers) {
+      return jsonResponse_({
+        error: "Invalid sheet name",
+        allowedSheets: Object.keys(SHEET_CONFIG),
+      });
+    }
+
+    const keyHeader = getSheetKey_(sheetName);
+    if (!keyHeader) {
+      return jsonResponse_({ error: "No unique key configured for sheet" });
+    }
+
+    var keysToDelete = [];
+    if (Array.isArray(payload.keys)) {
+      keysToDelete = payload.keys;
+    } else if (payload.key !== undefined && payload.key !== null) {
+      keysToDelete = [payload.key];
+    } else if (Array.isArray(payload.data)) {
+      keysToDelete = payload.data.map(function(item) {
+        return item[keyHeader] || item.id || item.order_id || item.payment_id;
+      }).filter(Boolean);
+    }
+
+    const sheet = setup.sheets[sheetName];
+    const result = deleteRowsByKey_(sheet, headers, keyHeader, keysToDelete);
+
+    return jsonResponse_({
+      success: true,
+      sheet: sheetName,
+      key: keyHeader,
+      deleted: result.deleted,
+      keys: keysToDelete,
+    });
+  }
+
   if (action !== "sync") {
     return jsonResponse_({ error: "Invalid action" });
   }
@@ -293,6 +369,20 @@ function doPost(e) {
   }
 
   const sheet = setup.sheets[sheetName];
+
+  // Process any deletions passed in sync action for backward compatibility
+  var deletedCount = 0;
+  var keysToDelete = [];
+  if (Array.isArray(payload.deleteKeys)) {
+    keysToDelete = payload.deleteKeys;
+  } else if (Array.isArray(payload.keys)) {
+    keysToDelete = payload.keys;
+  }
+  if (keysToDelete.length > 0) {
+    var delResult = deleteRowsByKey_(sheet, headers, keyHeader, keysToDelete);
+    deletedCount = delResult.deleted;
+  }
+
   const data = Array.isArray(payload.data) ? payload.data : [];
   const result = upsertRows_(sheet, headers, data, keyHeader);
 
@@ -303,6 +393,7 @@ function doPost(e) {
     rows: data.length,
     inserted: result.inserted,
     updated: result.updated,
+    deleted: deletedCount,
     duplicatesRemoved: result.duplicatesRemoved,
   });
 }

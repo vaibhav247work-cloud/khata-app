@@ -29,11 +29,23 @@ import {
   Square,
   ListChecks,
   X,
-  AlertTriangle
+  AlertTriangle,
+  Printer,
+  Share2,
+  ArrowUpDown,
+  CheckCheck
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { db, type Transaction, type Order, type OrderPayment, type OrderItem } from './db';
-import { hasUnsyncedLocalChanges, markAllLocalDataSynced, syncLocalAndGoogleSheets, type SyncTrigger } from './sync';
+import { 
+  hasUnsyncedLocalChanges, 
+  markAllLocalDataSynced, 
+  syncLocalAndGoogleSheets, 
+  reconcileOrdersWithTransactions,
+  deleteTransactionsWithRecalculation,
+  deleteOrderWithAssociated,
+  type SyncTrigger 
+} from './sync';
 import { format, startOfDay, endOfDay, startOfWeek, endOfWeek, startOfMonth, endOfMonth, isWithinInterval, parseISO } from 'date-fns';
 import { 
   BarChart, 
@@ -63,6 +75,454 @@ const PAYMENT_TYPES = ['Cash', 'UPI', 'Bank Transfer', 'Card', 'Online'] as cons
 const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8'];
 const SYNC_PENDING_KEY = 'BT_PENDING_SYNC';
 const LAST_SYNC_AT_KEY = 'BT_LAST_SYNC_AT';
+
+// --- Shared File, PDF & Native Share Utilities ---
+
+const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return window.btoa(binary);
+};
+
+const downloadBlobFallback = (blob: Blob, filename: string) => {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 1000);
+};
+
+const saveOrShareReport = async (
+  base64Data: string, 
+  filename: string, 
+  mimeType: string,
+  rawArrayBuffer?: ArrayBuffer
+): Promise<boolean> => {
+  const cleanBase64 = base64Data.includes('base64,')
+    ? base64Data.split('base64,')[1]
+    : base64Data;
+
+  // 1. Native Capacitor Android & iOS
+  if (Capacitor.isNativePlatform()) {
+    try {
+      // A. Save permanently to Documents directory on the device
+      try {
+        await Filesystem.writeFile({
+          path: filename,
+          data: cleanBase64,
+          directory: Directory.Documents,
+          recursive: true,
+        });
+      } catch (docWriteErr) {
+        console.warn('Documents directory write bypassed:', docWriteErr);
+      }
+
+      // B. Save to Cache directory for share provider URI
+      const writeResult = await Filesystem.writeFile({
+        path: filename,
+        data: cleanBase64,
+        directory: Directory.Cache,
+        recursive: true,
+      });
+
+      const uriResult = await Filesystem.getUri({
+        directory: Directory.Cache,
+        path: filename,
+      });
+
+      const fileUri = uriResult.uri || writeResult.uri;
+
+      // C. Open Native Share sheet (for WhatsApp, Email, Wireless Print, etc.)
+      try {
+        await Share.share({
+          title: filename,
+          text: `KhataBook: ${filename}`,
+          files: [fileUri],
+          dialogTitle: `Share or Print ${filename}`,
+        });
+      } catch (shareErr: any) {
+        const errStr = String(shareErr?.message || '').toLowerCase();
+        if (!errStr.includes('cancel') && !errStr.includes('dismiss') && !errStr.includes('abort')) {
+          try {
+            await Share.share({
+              title: filename,
+              url: fileUri,
+              dialogTitle: `Share ${filename}`,
+            });
+          } catch {}
+        }
+      }
+      return true;
+    } catch (err: any) {
+      console.warn('Native file share/save error:', err);
+      const errMsg = String(err?.message || '').toLowerCase();
+      if (errMsg.includes('cancel') || errMsg.includes('dismiss') || errMsg.includes('abort')) {
+        return true;
+      }
+      return false;
+    }
+  }
+
+  // 2. Web / Mobile Browser
+  // First, ALWAYS download the file directly to the device Downloads folder
+  let blob: Blob;
+  if (rawArrayBuffer) {
+    blob = new Blob([rawArrayBuffer], { type: mimeType });
+  } else {
+    const byteCharacters = atob(cleanBase64);
+    const byteNumbers = new Array(byteCharacters.length);
+    for (let i = 0; i < byteCharacters.length; i++) {
+      byteNumbers[i] = byteCharacters.charCodeAt(i);
+    }
+    const byteArray = new Uint8Array(byteNumbers);
+    blob = new Blob([byteArray], { type: mimeType });
+  }
+
+  // Trigger device browser download
+  downloadBlobFallback(blob, filename);
+
+  // Next, if Mobile Web Share is supported, also prompt the share sheet
+  if (typeof navigator !== 'undefined' && navigator.share) {
+    try {
+      const file = new File([blob], filename, { type: mimeType });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          title: filename,
+          text: `KhataBook: ${filename}`,
+          files: [file],
+        });
+      }
+    } catch (webShareErr: any) {
+      // User cancelled share dialog or dismiss
+    }
+  }
+
+  return true;
+};
+
+const generateAndShareOrderReceipts = async (ordersList: Order[], showToast?: any): Promise<void> => {
+  if (!ordersList || ordersList.length === 0) {
+    if (showToast) showToast('No orders selected to print', 'info');
+    return;
+  }
+
+  try {
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4',
+    });
+    (doc as any).autoTable = (options: any) => autoTable(doc, options);
+
+    // Font loading for Hindi / Rupee symbol
+    let hasCustomFont = false;
+    try {
+      const fontUrls = ['/fonts/Nirmala.ttf', './fonts/Nirmala.ttf', 'fonts/Nirmala.ttf'];
+      for (const url of fontUrls) {
+        try {
+          const fontResponse = await fetch(url);
+          if (fontResponse.ok) {
+            const fontBuf = await fontResponse.arrayBuffer();
+            if (fontBuf && fontBuf.byteLength > 0) {
+              const fontBase64 = arrayBufferToBase64(fontBuf);
+              doc.addFileToVFS('Nirmala.ttf', fontBase64);
+              doc.addFont('Nirmala.ttf', 'Nirmala', 'normal');
+              doc.setFont('Nirmala');
+              hasCustomFont = true;
+              break;
+            }
+          }
+        } catch {}
+      }
+    } catch (fontErr) {
+      console.warn('Custom font load bypassed:', fontErr);
+    }
+
+    const activeFont = hasCustomFont ? 'Nirmala' : 'helvetica';
+    const cur = hasCustomFont ? '₹' : 'Rs. ';
+
+    const formatOrderDate = (value: string) => {
+      try {
+        return format(parseISO(value), 'dd MMM yyyy, hh:mm a');
+      } catch {
+        return value || '-';
+      }
+    };
+
+    const isSingle = ordersList.length === 1;
+    const nowStr = format(new Date(), 'dd MMM yyyy, hh:mm a');
+
+    if (isSingle) {
+      const order = ordersList[0];
+      const items = order.items || [];
+      const orderIdShort = order.order_id.slice(0, 8).toUpperCase();
+
+      // Top Receipt Header Banner
+      doc.setFillColor(24, 24, 27);
+      doc.roundedRect(10, 10, 190, 26, 3, 3, 'F');
+      
+      doc.setTextColor(255, 255, 255);
+      doc.setFont(activeFont);
+      doc.setFontSize(16);
+      doc.text('KhataBook Pro', 16, 20);
+
+      doc.setFontSize(9);
+      doc.setTextColor(249, 115, 22);
+      doc.text('OFFICIAL ORDER RECEIPT', 16, 28);
+
+      doc.setFontSize(8);
+      doc.setTextColor(212, 212, 216);
+      doc.text(`Receipt #: ORD-${orderIdShort}`, 135, 20);
+      doc.text(`Date: ${formatOrderDate(order.date)}`, 135, 28);
+
+      // Supplier Info & Status Box
+      doc.setFillColor(244, 244, 245);
+      doc.roundedRect(10, 40, 190, 20, 3, 3, 'F');
+
+      doc.setFont(activeFont);
+      doc.setFontSize(7.5);
+      doc.setTextColor(113, 113, 122);
+      doc.text('SUPPLIER / VENDOR', 15, 47);
+      doc.text('ORDER STATUS', 140, 47);
+
+      doc.setFontSize(11);
+      doc.setTextColor(24, 24, 27);
+      doc.text(order.supplier || 'General Supplier', 15, 55);
+
+      const statusText = (order.status || 'Pending').toUpperCase();
+      if (order.status === 'Completed') {
+        doc.setTextColor(22, 101, 52);
+      } else if (order.status === 'Partial') {
+        doc.setTextColor(194, 65, 12);
+      } else {
+        doc.setTextColor(113, 113, 122);
+      }
+      doc.text(statusText, 140, 55);
+
+      // Items Table
+      const tableData = items.map((item, idx) => [
+        String(idx + 1),
+        item.material || 'Material Item',
+        item.quantity || '-',
+        `${cur}${(Number(item.amount) || 0).toLocaleString('en-IN')}`
+      ]);
+
+      autoTable(doc, {
+        head: [['#', 'Material Description', 'Quantity', 'Amount']],
+        body: tableData.length > 0 ? tableData : [['1', 'General Items', '-', `${cur}${order.total_amount.toLocaleString('en-IN')}`]],
+        startY: 65,
+        theme: 'grid',
+        styles: {
+          font: activeFont,
+          fontSize: 8,
+          textColor: [39, 39, 42],
+          lineColor: [228, 228, 231],
+          lineWidth: 0.15,
+          cellPadding: 2.2,
+        },
+        headStyles: {
+          font: activeFont,
+          fillColor: [234, 88, 12],
+          textColor: [255, 255, 255],
+          lineColor: [194, 65, 12],
+          lineWidth: 0.15,
+          fontStyle: 'normal',
+        },
+        alternateRowStyles: { fillColor: [250, 250, 250] },
+        columnStyles: {
+          0: { cellWidth: 12, halign: 'center' },
+          1: { cellWidth: 'auto' },
+          2: { cellWidth: 35, halign: 'center' },
+          3: { cellWidth: 40, halign: 'right' },
+        },
+      });
+
+      const finalY = (doc as any).lastAutoTable.finalY + 8;
+
+      // Financial Breakdown Summary Box
+      doc.setFillColor(250, 250, 250);
+      doc.setDrawColor(228, 228, 231);
+      doc.roundedRect(105, finalY, 95, 34, 3, 3, 'FD');
+
+      doc.setFont(activeFont);
+      doc.setFontSize(8.5);
+      doc.setTextColor(113, 113, 122);
+      doc.text('Total Order Amount:', 110, finalY + 8);
+      doc.text('Amount Paid to Date:', 110, finalY + 16);
+      doc.text('Outstanding Balance:', 110, finalY + 25);
+
+      doc.setTextColor(24, 24, 27);
+      doc.text(`${cur}${Number(order.total_amount || 0).toLocaleString('en-IN')}`, 192, finalY + 8, { align: 'right' });
+
+      doc.setTextColor(22, 101, 52);
+      doc.text(`${cur}${Number(order.paid_amount || 0).toLocaleString('en-IN')}`, 192, finalY + 16, { align: 'right' });
+
+      doc.setTextColor(185, 28, 28);
+      doc.text(`${cur}${Number(order.remaining_amount || 0).toLocaleString('en-IN')}`, 192, finalY + 25, { align: 'right' });
+
+      // Verification Footer note
+      doc.setFontSize(7.5);
+      doc.setTextColor(161, 161, 170);
+      doc.text(`Printed / Shared on: ${nowStr}`, 15, finalY + 14);
+      doc.text('Valid electronic receipt generated via KhataBook Mobile Pro.', 15, finalY + 20);
+      doc.text('No physical signature required.', 15, finalY + 26);
+
+    } else {
+      // Multiple orders consolidated summary & receipts
+      const totalOrderValue = ordersList.reduce((sum, o) => sum + (Number(o.total_amount) || 0), 0);
+      const totalPaidValue = ordersList.reduce((sum, o) => sum + (Number(o.paid_amount) || 0), 0);
+      const totalRemainingValue = ordersList.reduce((sum, o) => sum + (Number(o.remaining_amount) || 0), 0);
+
+      // Header Banner
+      doc.setFillColor(24, 24, 27);
+      doc.roundedRect(10, 10, 190, 26, 3, 3, 'F');
+      
+      doc.setTextColor(255, 255, 255);
+      doc.setFont(activeFont);
+      doc.setFontSize(15);
+      doc.text('KhataBook Pro', 16, 20);
+
+      doc.setFontSize(9);
+      doc.setTextColor(249, 115, 22);
+      doc.text(`CONSOLIDATED ORDERS SUMMARY (${ordersList.length} ORDERS)`, 16, 28);
+
+      doc.setFontSize(8);
+      doc.setTextColor(212, 212, 216);
+      doc.text(`Generated: ${nowStr}`, 130, 24);
+
+      // 3 Stat Boxes at top
+      doc.setFillColor(244, 244, 245);
+      doc.roundedRect(10, 40, 60, 18, 3, 3, 'F');
+      doc.setFillColor(240, 253, 244);
+      doc.roundedRect(75, 40, 60, 18, 3, 3, 'F');
+      doc.setFillColor(254, 242, 242);
+      doc.roundedRect(140, 40, 60, 18, 3, 3, 'F');
+
+      doc.setFont(activeFont);
+      doc.setFontSize(7.5);
+      doc.setTextColor(113, 113, 122);
+      doc.text('TOTAL ORDERS VALUE', 15, 46);
+      doc.setTextColor(22, 101, 52);
+      doc.text('TOTAL PAID', 80, 46);
+      doc.setTextColor(185, 28, 28);
+      doc.text('OUTSTANDING BALANCE', 145, 46);
+
+      doc.setFontSize(9.5);
+      doc.setTextColor(24, 24, 27);
+      doc.text(`${cur}${totalOrderValue.toLocaleString('en-IN')}`, 15, 54);
+      doc.setTextColor(22, 101, 52);
+      doc.text(`${cur}${totalPaidValue.toLocaleString('en-IN')}`, 80, 54);
+      doc.setTextColor(185, 28, 28);
+      doc.text(`${cur}${totalRemainingValue.toLocaleString('en-IN')}`, 145, 54);
+
+      // Multi-Order Table Breakdown
+      const tableData = ordersList.map((o, idx) => {
+        const itemSummary = (o.items || []).map(i => `${i.material}${i.quantity ? ` (${i.quantity})` : ''}`).join(', ');
+        return [
+          String(idx + 1),
+          formatOrderDate(o.date),
+          o.supplier || '-',
+          itemSummary || 'General Order',
+          o.status || 'Pending',
+          `${cur}${Number(o.total_amount || 0).toLocaleString('en-IN')}`,
+          `${cur}${Number(o.paid_amount || 0).toLocaleString('en-IN')}`,
+          `${cur}${Number(o.remaining_amount || 0).toLocaleString('en-IN')}`
+        ];
+      });
+
+      // Add summary row
+      tableData.push([
+        '',
+        'GRAND TOTAL',
+        `${ordersList.length} Orders`,
+        '-',
+        '-',
+        `${cur}${totalOrderValue.toLocaleString('en-IN')}`,
+        `${cur}${totalPaidValue.toLocaleString('en-IN')}`,
+        `${cur}${totalRemainingValue.toLocaleString('en-IN')}`
+      ]);
+
+      autoTable(doc, {
+        head: [['#', 'Date', 'Supplier', 'Materials / Items', 'Status', 'Total', 'Paid', 'Balance']],
+        body: tableData,
+        startY: 64,
+        theme: 'grid',
+        styles: {
+          font: activeFont,
+          fontSize: 7,
+          textColor: [39, 39, 42],
+          lineColor: [228, 228, 231],
+          lineWidth: 0.15,
+          cellPadding: 1.5,
+        },
+        headStyles: {
+          font: activeFont,
+          fillColor: [234, 88, 12],
+          textColor: [255, 255, 255],
+          lineColor: [194, 65, 12],
+          lineWidth: 0.15,
+          fontStyle: 'normal',
+        },
+        alternateRowStyles: { fillColor: [250, 250, 250] },
+        columnStyles: {
+          0: { cellWidth: 8, halign: 'center' },
+          1: { cellWidth: 26 },
+          2: { cellWidth: 26 },
+          3: { cellWidth: 'auto' },
+          4: { cellWidth: 16 },
+          5: { cellWidth: 20, halign: 'right' },
+          6: { cellWidth: 20, halign: 'right' },
+          7: { cellWidth: 20, halign: 'right' },
+        },
+        didDrawPage: (data) => {
+          doc.setFont(activeFont);
+          doc.setFontSize(7.5);
+          doc.setTextColor(113, 113, 122);
+          doc.text(`Page ${data.pageNumber} • KhataBook Mobile Pro`, 190, 288, { align: 'right' });
+        },
+      });
+    }
+
+    const filename = isSingle
+      ? `Order_Receipt_${(ordersList[0].supplier || 'Supplier').replace(/[^a-zA-Z0-9]/g, '_')}_${format(new Date(), 'yyyyMMdd_HHmm')}.pdf`
+      : `Orders_Summary_${ordersList.length}Orders_${format(new Date(), 'yyyyMMdd_HHmm')}.pdf`;
+
+    const pdfArrayBuffer = doc.output('arraybuffer');
+    const pdfBase64 = arrayBufferToBase64(pdfArrayBuffer);
+
+    // Share or Save
+    const isHandled = await saveOrShareReport(
+      pdfBase64,
+      filename,
+      'application/pdf',
+      pdfArrayBuffer
+    );
+
+    if (!isHandled) {
+      const pdfBlob = new Blob([pdfArrayBuffer], { type: 'application/pdf' });
+      downloadBlobFallback(pdfBlob, filename);
+    }
+
+    if (showToast) {
+      showToast(isSingle ? 'Order receipt saved to device & opened for share/print!' : `${ordersList.length} order receipts saved to device & opened for share/print!`, 'success');
+    }
+  } catch (error: any) {
+    console.error('Order receipt generation/share error:', error);
+    if (showToast) {
+      showToast('Failed to generate order receipt. Please try again.', 'error');
+    }
+  }
+};
 
 // --- Components ---
 
@@ -156,6 +616,9 @@ export default function App() {
 
   // --- Data Loading ---
   const loadData = async () => {
+    // Automatically keep orders in sync with their transactions
+    await reconcileOrdersWithTransactions();
+
     const [txs, ords, localHasUnsyncedChanges] = await Promise.all([
       db.transactions.toArray(),
       db.orders.toArray(),
@@ -710,8 +1173,8 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
     setIsDeleting(true);
 
     try {
-      const idsToDelete = Array.from(selectedIds);
-      await db.transactions.bulkDelete(idsToDelete);
+      const idsToDelete: string[] = Array.from(selectedIds);
+      await deleteTransactionsWithRecalculation(idsToDelete);
       
       markSyncPending();
       setSelectedIds(new Set());
@@ -728,6 +1191,23 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
       }
     } finally {
       setIsDeleting(false);
+    }
+  };
+
+  const handleDeleteSingle = async (id: string) => {
+    try {
+      await deleteTransactionsWithRecalculation([id]);
+      markSyncPending();
+      closeTransactionForm();
+      if (showToast) {
+        showToast('Transaction deleted successfully', 'success');
+      }
+      onAdd();
+    } catch (err) {
+      console.error('Delete transaction error:', err);
+      if (showToast) {
+        showToast('Failed to delete transaction', 'error');
+      }
     }
   };
 
@@ -763,6 +1243,7 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
       await db.transactions.add(tx);
     }
 
+    await reconcileOrdersWithTransactions();
     markSyncPending();
     closeTransactionForm();
     onAdd();
@@ -1142,7 +1623,16 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
                   <input name="reference" type="text" defaultValue={editingTransaction?.reference || ''} placeholder="Bill No / UPI ID" className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm text-white" />
                 </div>
 
-                <div className="flex gap-4 pt-4">
+                <div className="flex flex-col sm:flex-row gap-3 pt-4">
+                  {editingTransaction && (
+                    <button 
+                      type="button" 
+                      onClick={() => handleDeleteSingle(editingTransaction.id)} 
+                      className="bg-red-500/15 hover:bg-red-500 border border-red-500/30 text-red-400 hover:text-white py-4 px-6 rounded-2xl font-bold text-sm transition-all flex items-center justify-center gap-2"
+                    >
+                      <Trash2 className="w-4 h-4" /> Delete
+                    </button>
+                  )}
                   <button type="button" onClick={closeTransactionForm} className="flex-1 bg-zinc-800 hover:bg-zinc-700 py-4 rounded-2xl font-bold text-sm text-zinc-300 transition-colors">Cancel</button>
                   <button type="submit" className="flex-1 bg-orange-500 hover:bg-orange-600 py-4 rounded-2xl font-bold text-sm text-white shadow-lg shadow-orange-500/20 transition-colors">{editingTransaction ? 'Update Entry' : 'Save Entry'}</button>
                 </div>
@@ -1161,23 +1651,246 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending }:
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
   const [orderSearchQuery, setOrderSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'All' | 'Pending' | 'Partial' | 'Completed'>('All');
+  const [sortAsc, setSortAsc] = useState(false); // false = newest date first, true = oldest date first
   const createEmptyOrderItem = (): OrderItem => ({ id: crypto.randomUUID(), material: '', quantity: '', amount: 0 });
   const [newItems, setNewItems] = useState<OrderItem[]>([createEmptyOrderItem()]);
 
-  const filteredOrders = useMemo(() => {
-    const sorted = [...orders].sort((a: Order, b: Order) => b.date.localeCompare(a.date));
-    if (!orderSearchQuery.trim()) return sorted;
+  // Multi-select & Bulk Action state
+  const [selectedOrderIds, setSelectedOrderIds] = useState<Set<string>>(new Set());
+  const [isPrinting, setIsPrinting] = useState(false);
+  const [printingOrderId, setPrintingOrderId] = useState<string | null>(null);
+  const [isBulkCompleting, setIsBulkCompleting] = useState(false);
+  const [showSettleModal, setShowSettleModal] = useState(false);
+  const [settlePaymentType, setSettlePaymentType] = useState('Cash');
+  const [settleDate, setSettleDate] = useState(() => format(new Date(), 'yyyy-MM-dd'));
+  const [isSettling, setIsSettling] = useState(false);
 
-    const q = orderSearchQuery.toLowerCase().trim();
-    return sorted.filter((order: Order) => {
-      const matchSupplier = (order.supplier || '').toLowerCase().includes(q);
-      const matchItems = (order.items || []).some(item => 
-        (item.material || '').toLowerCase().includes(q) ||
-        (item.quantity || '').toLowerCase().includes(q)
-      );
-      return matchSupplier || matchItems;
+  const statusCounts = useMemo(() => ({
+    All: orders.length,
+    Pending: orders.filter((o: Order) => o.status === 'Pending').length,
+    Partial: orders.filter((o: Order) => o.status === 'Partial').length,
+    Completed: orders.filter((o: Order) => o.status === 'Completed').length,
+  }), [orders]);
+
+  const filteredOrders = useMemo(() => {
+    let result = [...orders];
+
+    // Status filter
+    if (statusFilter !== 'All') {
+      result = result.filter((o: Order) => o.status === statusFilter);
+    }
+
+    // Search query
+    if (orderSearchQuery.trim()) {
+      const q = orderSearchQuery.toLowerCase().trim();
+      result = result.filter((order: Order) => {
+        const matchSupplier = (order.supplier || '').toLowerCase().includes(q);
+        const matchItems = (order.items || []).some(item => 
+          (item.material || '').toLowerCase().includes(q) ||
+          (item.quantity || '').toLowerCase().includes(q)
+        );
+        return matchSupplier || matchItems;
+      });
+    }
+
+    // Sorting: Newest first by default, or Oldest first when toggled
+    result.sort((a: Order, b: Order) => {
+      const cmp = b.date.localeCompare(a.date);
+      return sortAsc ? -cmp : cmp;
     });
-  }, [orders, orderSearchQuery]);
+
+    return result;
+  }, [orders, statusFilter, orderSearchQuery, sortAsc]);
+
+  const filteredSummary = useMemo(() => {
+    const totalCount = filteredOrders.length;
+    const totalValue = filteredOrders.reduce((sum: number, o: Order) => sum + (Number(o.total_amount) || 0), 0);
+    const totalPaid = filteredOrders.reduce((sum: number, o: Order) => sum + (Number(o.paid_amount) || 0), 0);
+    const totalRemaining = filteredOrders.reduce((sum: number, o: Order) => sum + (Number(o.remaining_amount) || 0), 0);
+    return { totalCount, totalValue, totalPaid, totalRemaining };
+  }, [filteredOrders]);
+
+  const selectedOrders = useMemo(() => {
+    return orders.filter((o: Order) => selectedOrderIds.has(o.order_id));
+  }, [orders, selectedOrderIds]);
+
+  const selectedTotalAmount = useMemo(() => {
+    return selectedOrders.reduce((sum: number, o: Order) => sum + (Number(o.total_amount) || 0), 0);
+  }, [selectedOrders]);
+
+  const selectedPaidAmount = useMemo(() => {
+    return selectedOrders.reduce((sum: number, o: Order) => sum + (Number(o.paid_amount) || 0), 0);
+  }, [selectedOrders]);
+
+  const selectedRemainingAmount = useMemo(() => {
+    return selectedOrders.reduce((sum: number, o: Order) => sum + (Number(o.remaining_amount) || 0), 0);
+  }, [selectedOrders]);
+
+  const ordersWithPendingBalance = useMemo(() => {
+    return selectedOrders.filter((o: Order) => Number(o.remaining_amount) > 0);
+  }, [selectedOrders]);
+
+  const allVisibleOrdersSelected = filteredOrders.length > 0 && filteredOrders.every((o: Order) => selectedOrderIds.has(o.order_id));
+
+  const toggleSelectOrder = (orderId: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setSelectedOrderIds(prev => {
+      const next = new Set(prev);
+      if (next.has(orderId)) {
+        next.delete(orderId);
+      } else {
+        next.add(orderId);
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectAllOrders = () => {
+    if (allVisibleOrdersSelected) {
+      setSelectedOrderIds(new Set());
+    } else {
+      setSelectedOrderIds(new Set(filteredOrders.map((o: Order) => o.order_id)));
+    }
+  };
+
+  const cancelOrderSelection = () => {
+    setSelectedOrderIds(new Set());
+  };
+
+  const handleBulkMarkCompleted = async () => {
+    if (selectedOrders.length === 0) return;
+
+    const incompleteOrders = selectedOrders.filter(
+      (o: Order) => o.status !== 'Completed' || Number(o.remaining_amount) > 0
+    );
+
+    if (incompleteOrders.length === 0) {
+      showToast('All selected orders are already marked as Completed.', 'info');
+      return;
+    }
+
+    // If any selected order has pending balance, open the Settle & Complete popup
+    if (ordersWithPendingBalance.length > 0) {
+      setSettleDate(format(new Date(), 'yyyy-MM-dd'));
+      setShowSettleModal(true);
+      return;
+    }
+
+    // Otherwise, all selected orders already have balance 0 (fully paid), complete them directly
+    setIsBulkCompleting(true);
+    try {
+      for (const order of incompleteOrders) {
+        await db.orders.update(order.order_id, {
+          status: 'Completed',
+          remaining_amount: 0,
+          synced: false
+        });
+      }
+      markSyncPending();
+      onUpdate();
+      showToast(`Marked ${incompleteOrders.length} fully paid order${incompleteOrders.length > 1 ? 's' : ''} as Completed!`, 'success');
+      setSelectedOrderIds(new Set());
+    } catch (err) {
+      console.error('Bulk mark completed error:', err);
+      showToast('Failed to mark orders as Completed', 'error');
+    } finally {
+      setIsBulkCompleting(false);
+    }
+  };
+
+  const handleConfirmSettlePayments = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (selectedOrders.length === 0) return;
+
+    setIsSettling(true);
+    try {
+      const now = new Date();
+      const timeStr = format(now, 'HH:mm:ss');
+      const fullDate = `${settleDate}T${timeStr}`;
+
+      let settledCount = 0;
+      let totalSettledAmount = 0;
+
+      for (const order of selectedOrders) {
+        const balance = Number(order.remaining_amount);
+        if (balance > 0) {
+          // 1. Add payment record for the remaining balance
+          await db.orderPayments.add({
+            payment_id: crypto.randomUUID(),
+            order_id: order.order_id,
+            amount: balance,
+            payment_type: settlePaymentType,
+            date: fullDate,
+            synced: false,
+          });
+
+          // 2. Add Debit transaction for this balance payment
+          const itemSummary = getItemSummary(order.items || []);
+          await db.transactions.add({
+            id: crypto.randomUUID(),
+            date: fullDate,
+            type: 'Debit',
+            category: order.supplier,
+            amount: balance,
+            payment_type: settlePaymentType as any,
+            description: `Payment done for ${itemSummary}`,
+            order_id: order.order_id,
+            synced: false,
+          });
+
+          // 3. Update order to Completed
+          await db.orders.update(order.order_id, {
+            paid_amount: order.total_amount,
+            remaining_amount: 0,
+            status: 'Completed',
+            synced: false,
+          });
+
+          settledCount++;
+          totalSettledAmount += balance;
+        } else {
+          // Balance was already 0, update status to Completed
+          await db.orders.update(order.order_id, {
+            status: 'Completed',
+            remaining_amount: 0,
+            synced: false,
+          });
+        }
+      }
+
+      markSyncPending();
+      onUpdate();
+      showToast(
+        `Recorded balance payments (₹${totalSettledAmount.toLocaleString('en-IN')}) and marked ${selectedOrders.length} order(s) as Completed!`,
+        'success'
+      );
+      setShowSettleModal(false);
+      setSelectedOrderIds(new Set());
+    } catch (error) {
+      console.error('Error settling orders:', error);
+      showToast('Failed to complete order payments', 'error');
+    } finally {
+      setIsSettling(false);
+    }
+  };
+
+  const handlePrintOrders = async (ordersToPrint: Order[]) => {
+    if (ordersToPrint.length === 0) {
+      if (showToast) showToast('Please select at least one order to print', 'info');
+      return;
+    }
+    setIsPrinting(true);
+    if (ordersToPrint.length === 1) {
+      setPrintingOrderId(ordersToPrint[0].order_id);
+    }
+    try {
+      await generateAndShareOrderReceipts(ordersToPrint, showToast);
+    } finally {
+      setIsPrinting(false);
+      setPrintingOrderId(null);
+    }
+  };
 
   const getItemSummary = (items: OrderItem[]) => {
     const validItems = (items || []).filter(i => i.material.trim() !== '');
@@ -1351,31 +2064,7 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending }:
         return;
       }
 
-      // 1. Delete associated payments
-      for (const p of payments) {
-        await db.orderPayments.delete(p.payment_id);
-      }
-
-      // 2. Delete associated transactions
-      // First try by order_id (new system)
-      const txsByOrderId = await db.transactions.where('order_id').equals(order.order_id).toArray();
-      for (const tx of txsByOrderId) {
-        await db.transactions.delete(tx.id);
-      }
-
-      // Also try by description for older records (fallback)
-      const itemSummary = getItemSummary(order.items || []);
-      const txsByDesc = await db.transactions
-        .where('category').equals(order.supplier)
-        .and(t => t.description === `Payment done for ${itemSummary}`)
-        .toArray();
-      
-      for (const tx of txsByDesc) {
-        await db.transactions.delete(tx.id);
-      }
-      
-      // 3. Delete the order itself
-      await db.orders.delete(order.order_id);
+      await deleteOrderWithAssociated(order);
       
       setOrderToDelete(null);
       markSyncPending();
@@ -1391,8 +2080,9 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending }:
     <motion.div 
       initial={{ opacity: 0, x: 20 }}
       animate={{ opacity: 1, x: 0 }}
-      className="space-y-6"
+      className="space-y-5"
     >
+      {/* Top Search & Actions Row */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
         <div className="relative flex-1">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500 w-5 h-5" />
@@ -1402,7 +2092,7 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending }:
             value={orderSearchQuery}
             onChange={(e) => setOrderSearchQuery(e.target.value)}
             placeholder="Search by supplier or material..." 
-            className="w-full bg-zinc-900 border border-zinc-800 rounded-2xl pl-12 pr-10 py-3.5 sm:py-4 text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-orange-500 text-sm"
+            className="w-full bg-zinc-900 border border-zinc-800 rounded-2xl pl-12 pr-10 py-3.5 text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-orange-500 text-sm"
           />
           {orderSearchQuery && (
             <button
@@ -1416,97 +2106,363 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending }:
             </button>
           )}
         </div>
-        <button 
-          id="add-new-order-btn"
-          onClick={openAddOrderForm}
-          className="bg-orange-500 hover:bg-orange-600 px-5 py-3.5 sm:py-4 rounded-2xl text-white font-bold shadow-lg shadow-orange-500/20 active:scale-95 transition-all flex items-center justify-center gap-2 shrink-0"
+
+        <div className="flex items-center gap-2">
+          {filteredOrders.length > 0 && (
+            <button
+              id="toggle-multi-select-orders-btn"
+              type="button"
+              onClick={() => {
+                if (selectedOrderIds.size > 0) {
+                  cancelOrderSelection();
+                } else {
+                  toggleSelectAllOrders();
+                }
+              }}
+              title={selectedOrderIds.size > 0 ? 'Clear Selection' : 'Select All Orders for Bulk Actions'}
+              className={`p-3.5 rounded-2xl border transition-all flex items-center justify-center shrink-0 ${
+                selectedOrderIds.size > 0 
+                  ? 'bg-orange-500/20 border-orange-500 text-orange-400 shadow-lg shadow-orange-500/20' 
+                  : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-700'
+              }`}
+            >
+              <ListChecks className="w-5 h-5" />
+            </button>
+          )}
+
+          <button 
+            id="add-new-order-btn"
+            onClick={openAddOrderForm}
+            className="bg-orange-500 hover:bg-orange-600 px-4 sm:px-5 py-3.5 rounded-2xl text-white font-bold shadow-lg shadow-orange-500/20 active:scale-95 transition-all flex items-center justify-center gap-2 shrink-0 flex-1 sm:flex-initial"
+          >
+            <Plus className="w-5 h-5 text-white" />
+            <span className="text-sm">New Order</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Status Filter & Sort Controls Row */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5 pt-1">
+        {/* Status Filter Tabs */}
+        <div className="flex items-center gap-1 p-1 bg-zinc-900/90 border border-zinc-800/80 rounded-2xl overflow-x-auto max-w-full">
+          {(['All', 'Pending', 'Partial', 'Completed'] as const).map((tab) => {
+            const count = statusCounts[tab];
+            const isActive = statusFilter === tab;
+            return (
+              <button
+                key={tab}
+                id={`order-status-filter-tab-${tab.toLowerCase()}`}
+                type="button"
+                onClick={() => setStatusFilter(tab)}
+                className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all flex items-center gap-1.5 ${
+                  isActive
+                    ? tab === 'Completed'
+                      ? 'bg-green-500/20 text-green-400 border border-green-500/40 shadow-sm'
+                      : tab === 'Partial'
+                      ? 'bg-orange-500/20 text-orange-400 border border-orange-500/40 shadow-sm'
+                      : tab === 'Pending'
+                      ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/40 shadow-sm'
+                      : 'bg-zinc-800 text-white border border-zinc-700 shadow-sm'
+                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40 border border-transparent'
+                }`}
+              >
+                <span>{tab}</span>
+                <span className={`text-[10px] px-1.5 py-0.5 rounded-full leading-none font-bold ${
+                  isActive ? 'bg-white/15' : 'bg-zinc-800 text-zinc-500'
+                }`}>
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Date Sort Toggle Button */}
+        <button
+          id="toggle-order-date-sort-btn"
+          type="button"
+          onClick={() => setSortAsc(!sortAsc)}
+          className="flex items-center gap-2 px-3.5 py-2 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-750 rounded-xl text-xs font-semibold text-zinc-300 transition-colors shrink-0 active:scale-95"
+          title={sortAsc ? 'Currently sorting: Oldest First. Click for Newest First.' : 'Currently sorting: Newest First. Click for Oldest First.'}
         >
-          <Plus className="w-5 h-5 text-white" />
-          <span className="text-sm">New Order</span>
+          <ArrowUpDown className="w-3.5 h-3.5 text-orange-400" />
+          <span>{sortAsc ? 'Date: Oldest First' : 'Date: Newest First'}</span>
         </button>
       </div>
 
+      {/* Filtered Orders Financial Summary Row */}
+      <div className="grid grid-cols-3 gap-3 bg-gradient-to-br from-zinc-900 via-zinc-900 to-zinc-950 border border-zinc-800/90 rounded-2xl p-4 shadow-sm">
+        <div className="flex flex-col min-w-0">
+          <span className="text-zinc-500 text-[11px] font-semibold tracking-wide uppercase truncate">
+            {statusFilter === 'All' ? 'Total Orders' : `${statusFilter} Orders`}
+          </span>
+          <span className="text-lg sm:text-xl font-bold text-white mt-0.5">
+            {filteredSummary.totalCount}
+            <span className="text-[11px] text-zinc-500 font-normal ml-1.5 hidden sm:inline">
+              {filteredSummary.totalCount === 1 ? 'order' : 'orders'}
+            </span>
+          </span>
+        </div>
+
+        <div className="flex flex-col min-w-0 border-l border-zinc-800 pl-3 sm:pl-4">
+          <span className="text-zinc-500 text-[11px] font-semibold tracking-wide uppercase truncate">Total Value</span>
+          <span className="text-lg sm:text-xl font-bold text-zinc-100 mt-0.5 truncate">
+            ₹{filteredSummary.totalValue.toLocaleString('en-IN')}
+          </span>
+        </div>
+
+        <div className="flex flex-col min-w-0 border-l border-zinc-800 pl-3 sm:pl-4">
+          <span className="text-zinc-500 text-[11px] font-semibold tracking-wide uppercase truncate">Remaining Balance</span>
+          <span className={`text-lg sm:text-xl font-bold mt-0.5 truncate ${filteredSummary.totalRemaining > 0 ? 'text-red-400' : 'text-green-400'}`}>
+            ₹{filteredSummary.totalRemaining.toLocaleString('en-IN')}
+          </span>
+        </div>
+      </div>
+
+      {/* Multi-Select Action Toolbar for Orders */}
+      <AnimatePresence>
+        {selectedOrderIds.size > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: -8, scale: 0.99 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -8, scale: 0.99 }}
+            transition={{ duration: 0.15 }}
+            className="bg-gradient-to-r from-zinc-900 via-zinc-900 to-zinc-850 border border-orange-500/40 rounded-2xl p-3.5 shadow-xl space-y-3"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2">
+                <button
+                  id="select-all-orders-btn"
+                  type="button"
+                  onClick={toggleSelectAllOrders}
+                  className="flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition-colors"
+                >
+                  {allVisibleOrdersSelected ? (
+                    <>
+                      <CheckSquare className="w-3.5 h-3.5 text-orange-500" />
+                      Deselect All
+                    </>
+                  ) : (
+                    <>
+                      <Square className="w-3.5 h-3.5 text-zinc-400" />
+                      Select All ({filteredOrders.length})
+                    </>
+                  )}
+                </button>
+
+                <span className="bg-orange-500/20 text-orange-400 border border-orange-500/30 text-xs font-bold px-2.5 py-1 rounded-xl">
+                  {selectedOrderIds.size} Selected
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2 ml-auto">
+                {/* Mark as Completed Bulk Action */}
+                <button
+                  id="bulk-mark-completed-btn"
+                  type="button"
+                  onClick={handleBulkMarkCompleted}
+                  disabled={isBulkCompleting || selectedOrders.length === 0}
+                  className="flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-xl bg-green-600 hover:bg-green-500 active:scale-95 text-white transition-all shadow-md shadow-green-600/20 disabled:opacity-40 disabled:cursor-not-allowed"
+                  title={
+                    ordersWithPendingBalance.length > 0 
+                      ? `Settle remaining balances and mark ${selectedOrders.length} order(s) as Completed` 
+                      : `Mark ${selectedOrders.length} fully paid order(s) as Completed`
+                  }
+                >
+                  {isBulkCompleting ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <CheckCheck className="w-3.5 h-3.5" />
+                  )}
+                  <span>
+                    Mark Completed ({selectedOrderIds.size})
+                  </span>
+                </button>
+
+                {/* Print & Share Selected Orders */}
+                <button
+                  id="print-selected-orders-btn"
+                  type="button"
+                  onClick={() => handlePrintOrders(selectedOrders)}
+                  disabled={isPrinting}
+                  className="flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-xl bg-orange-500 hover:bg-orange-600 active:scale-95 text-white transition-all shadow-md shadow-orange-500/20 disabled:opacity-50"
+                  title="Print & Share Selected Orders"
+                >
+                  {isPrinting && !printingOrderId ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Printer className="w-3.5 h-3.5" />
+                  )}
+                  <span>Print / Share ({selectedOrderIds.size})</span>
+                </button>
+
+                <button
+                  id="cancel-order-selection-btn"
+                  type="button"
+                  onClick={cancelOrderSelection}
+                  className="p-1.5 rounded-xl text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+                  title="Clear selection"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Selected Orders Financial Summary */}
+            <div className="grid grid-cols-3 gap-2 bg-zinc-950/60 rounded-xl p-2.5 border border-zinc-800/80 text-xs">
+              <div>
+                <span className="text-zinc-500 block text-[10px] uppercase font-bold">Selected Total</span>
+                <span className="text-zinc-200 font-bold">₹{selectedTotalAmount.toLocaleString('en-IN')}</span>
+              </div>
+              <div>
+                <span className="text-zinc-500 block text-[10px] uppercase font-bold">Selected Paid</span>
+                <span className="text-green-500 font-bold">₹{selectedPaidAmount.toLocaleString('en-IN')}</span>
+              </div>
+              <div>
+                <span className="text-zinc-500 block text-[10px] uppercase font-bold">Selected Balance</span>
+                <span className="text-red-500 font-bold">₹{selectedRemainingAmount.toLocaleString('en-IN')}</span>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Orders List with Motion Entrance Animations */}
       <div className="grid gap-4">
-        {filteredOrders.map((order: Order) => (
-          <div key={order.order_id} className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 relative group">
-            <div className="absolute top-6 right-6 flex items-center gap-2">
-              <button
-                onClick={() => openEditOrderForm(order)}
-                className="p-2 rounded-xl transition-all text-zinc-400 hover:text-orange-400 hover:bg-orange-500/10"
-                title="Edit Order"
-              >
-                <Pencil className="w-4 h-4" />
-              </button>
-              <button 
-                onClick={() => setOrderToDelete(order)}
-                className={`p-2 rounded-xl transition-all ${
-                  (order.paid_amount || 0) === 0 
-                    ? 'text-zinc-400 hover:text-red-500 hover:bg-red-500/10 opacity-100' 
-                    : 'text-zinc-600 hover:text-red-500 hover:bg-red-500/10 opacity-0 group-hover:opacity-100'
-                }`}
-                title="Delete Order"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="flex justify-between items-start mb-4 pr-20">
-              <div>
-                <h3 className="text-lg font-bold">{order.supplier}</h3>
-                <p className="text-zinc-500 text-sm flex items-center gap-1">{getItemSummary(order.items || [])}</p>
+        <AnimatePresence mode="popLayout">
+          {filteredOrders.map((order: Order) => (
+            <motion.div 
+              key={order.order_id} 
+              layout
+              initial={{ opacity: 0, y: 16, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95, transition: { duration: 0.15 } }}
+              transition={{ duration: 0.2 }}
+              className={`bg-zinc-900 border rounded-3xl p-6 relative group transition-all ${
+                selectedOrderIds.has(order.order_id)
+                  ? 'border-orange-500/60 shadow-lg shadow-orange-500/5'
+                  : 'border-zinc-800 hover:border-zinc-750'
+              }`}
+            >
+              <div className="absolute top-6 right-6 flex items-center gap-1.5">
+                <button
+                  id={`print-single-order-btn-${order.order_id}`}
+                  type="button"
+                  onClick={() => handlePrintOrders([order])}
+                  disabled={isPrinting}
+                  className="p-2 rounded-xl transition-all text-zinc-400 hover:text-orange-400 hover:bg-orange-500/10 disabled:opacity-50"
+                  title="Print / Share Receipt"
+                >
+                  {printingOrderId === order.order_id ? (
+                    <RefreshCw className="w-4 h-4 animate-spin text-orange-500" />
+                  ) : (
+                    <Printer className="w-4 h-4" />
+                  )}
+                </button>
+                <button
+                  id={`edit-order-btn-${order.order_id}`}
+                  type="button"
+                  onClick={() => openEditOrderForm(order)}
+                  className="p-2 rounded-xl transition-all text-zinc-400 hover:text-orange-400 hover:bg-orange-500/10"
+                  title="Edit Order"
+                >
+                  <Pencil className="w-4 h-4" />
+                </button>
+                <button 
+                  id={`delete-order-btn-${order.order_id}`}
+                  type="button"
+                  onClick={() => setOrderToDelete(order)}
+                  className={`p-2 rounded-xl transition-all ${
+                    (order.paid_amount || 0) === 0 
+                      ? 'text-zinc-400 hover:text-red-500 hover:bg-red-500/10 opacity-100' 
+                      : 'text-zinc-600 hover:text-red-500 hover:bg-red-500/10 opacity-0 group-hover:opacity-100'
+                  }`}
+                  title="Delete Order"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
               </div>
-              <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                order.status === 'Completed' ? 'bg-green-500/10 text-green-500' : 
-                order.status === 'Partial' ? 'bg-orange-500/10 text-orange-500' : 'bg-zinc-800 text-zinc-500'
-              }`}>
-                {order.status}
-              </span>
-            </div>
 
-            {/* Items List */}
-            <div className="mb-6 space-y-2">
-              {(order.items || []).map((item) => (
-                <div key={item.id} className="flex justify-between text-xs border-b border-zinc-800 pb-2 last:border-0">
-                  <div className="flex flex-col">
-                    <span className="font-medium text-zinc-300">{item.material}</span>
-                    <span className="text-zinc-500">{item.quantity}</span>
+              <div className="flex items-start gap-3 mb-4 pr-28">
+                <button
+                  id={`select-order-checkbox-${order.order_id}`}
+                  type="button"
+                  onClick={(e) => toggleSelectOrder(order.order_id, e)}
+                  className={`w-5 h-5 mt-0.5 rounded-md border flex items-center justify-center shrink-0 transition-all ${
+                    selectedOrderIds.has(order.order_id)
+                      ? 'bg-orange-500 border-orange-500 text-white shadow-sm shadow-orange-500/30'
+                      : 'border-zinc-700 bg-zinc-800/60 hover:border-zinc-500 text-transparent hover:bg-zinc-800'
+                  }`}
+                  title={selectedOrderIds.has(order.order_id) ? 'Deselect order' : 'Select order for bulk actions / print'}
+                >
+                  <Check className={`w-3.5 h-3.5 stroke-[3] ${selectedOrderIds.has(order.order_id) ? 'opacity-100' : 'opacity-0'}`} />
+                </button>
+
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="text-lg font-bold truncate text-white">{order.supplier}</h3>
+                    <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider shrink-0 ${
+                      order.status === 'Completed' ? 'bg-green-500/10 text-green-500' : 
+                      order.status === 'Partial' ? 'bg-orange-500/10 text-orange-500' : 'bg-zinc-800 text-zinc-500'
+                    }`}>
+                      {order.status}
+                    </span>
                   </div>
-                  <span className="font-bold">₹{item.amount.toLocaleString()}</span>
+                  <div className="flex items-center gap-2 mt-0.5 text-xs text-zinc-500">
+                    <span className="truncate">{getItemSummary(order.items || [])}</span>
+                    <span>•</span>
+                    <span className="shrink-0">{format(parseISO(order.date), 'dd MMM yyyy')}</span>
+                  </div>
                 </div>
-              ))}
-            </div>
-            
-            <div className="grid grid-cols-3 gap-4 mb-6">
-              <div>
-                <p className="text-zinc-500 text-[10px] uppercase font-bold mb-1">Total</p>
-                <p className="font-bold text-sm">₹{order.total_amount.toLocaleString()}</p>
               </div>
-              <div>
-                <p className="text-zinc-500 text-[10px] uppercase font-bold mb-1">Paid</p>
-                <p className="font-bold text-sm text-green-500">₹{order.paid_amount.toLocaleString()}</p>
-              </div>
-              <div>
-                <p className="text-zinc-500 text-[10px] uppercase font-bold mb-1">Balance</p>
-                <p className="font-bold text-sm text-red-500">₹{order.remaining_amount.toLocaleString()}</p>
-              </div>
-            </div>
 
-            <div className="w-full bg-zinc-800 h-2 rounded-full mb-6 overflow-hidden">
-              <div 
-                className="bg-green-500 h-full transition-all duration-500" 
-                style={{ width: `${(order.paid_amount / order.total_amount) * 100}%` }}
-              />
-            </div>
+              {/* Items List */}
+              <div className="mb-6 space-y-2">
+                {(order.items || []).map((item) => (
+                  <div key={item.id} className="flex justify-between text-xs border-b border-zinc-800 pb-2 last:border-0">
+                    <div className="flex flex-col">
+                      <span className="font-medium text-zinc-300">{item.material}</span>
+                      <span className="text-zinc-500">{item.quantity}</span>
+                    </div>
+                    <span className="font-bold">₹{item.amount.toLocaleString('en-IN')}</span>
+                  </div>
+                ))}
+              </div>
+              
+              <div className="grid grid-cols-3 gap-4 mb-6">
+                <div>
+                  <p className="text-zinc-500 text-[10px] uppercase font-bold mb-1">Total</p>
+                  <p className="font-bold text-sm">₹{order.total_amount.toLocaleString('en-IN')}</p>
+                </div>
+                <div>
+                  <p className="text-zinc-500 text-[10px] uppercase font-bold mb-1">Paid</p>
+                  <p className="font-bold text-sm text-green-500">₹{order.paid_amount.toLocaleString('en-IN')}</p>
+                </div>
+                <div>
+                  <p className="text-zinc-500 text-[10px] uppercase font-bold mb-1">Balance</p>
+                  <p className="font-bold text-sm text-red-500">₹{order.remaining_amount.toLocaleString('en-IN')}</p>
+                </div>
+              </div>
 
-            {order.status !== 'Completed' && (
-              <button 
-                onClick={() => setSelectedOrder(order)}
-                className="w-full bg-zinc-800 hover:bg-zinc-700 py-3 rounded-xl font-bold text-sm transition-all"
-              >
-                Make Payment
-              </button>
-            )}
-          </div>
-        ))}
+              <div className="w-full bg-zinc-800 h-2 rounded-full mb-6 overflow-hidden">
+                <div 
+                  className="bg-green-500 h-full transition-all duration-500" 
+                  style={{ width: `${Math.min(100, (order.paid_amount / order.total_amount) * 100)}%` }}
+                />
+              </div>
+
+              {order.status !== 'Completed' && (
+                <button 
+                  id={`make-payment-order-btn-${order.order_id}`}
+                  onClick={() => setSelectedOrder(order)}
+                  className="w-full bg-zinc-800 hover:bg-zinc-700 py-3 rounded-xl font-bold text-sm transition-all"
+                >
+                  Make Payment
+                </button>
+              )}
+            </motion.div>
+          ))}
+        </AnimatePresence>
 
         {filteredOrders.length === 0 && (
           <div className="text-center py-16 bg-zinc-900/50 border border-zinc-800 border-dashed rounded-[32px] p-6 space-y-2">
@@ -1514,21 +2470,27 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending }:
               <Search className="w-6 h-6" />
             </div>
             <p className="text-zinc-400 font-bold">
-              {orderSearchQuery ? 'No matching orders found' : 'No orders recorded yet'}
+              {orderSearchQuery || statusFilter !== 'All' ? 'No matching orders found' : 'No orders recorded yet'}
             </p>
             <p className="text-zinc-600 text-xs max-w-sm mx-auto">
               {orderSearchQuery 
-                ? `No orders match "${orderSearchQuery}". Try searching by a different supplier name or material description.`
+                ? `No orders match "${orderSearchQuery}"${statusFilter !== 'All' ? ` in ${statusFilter}` : ''}. Try adjusting your search query or filter.`
+                : statusFilter !== 'All'
+                ? `There are no ${statusFilter.toLowerCase()} orders currently.`
                 : 'Tap New Order to record your first supplier order.'
               }
             </p>
-            {orderSearchQuery && (
+            {(orderSearchQuery || statusFilter !== 'All') && (
               <button
+                id="clear-order-search-filter-btn"
                 type="button"
-                onClick={() => setOrderSearchQuery('')}
+                onClick={() => {
+                  setOrderSearchQuery('');
+                  setStatusFilter('All');
+                }}
                 className="mt-3 inline-block text-xs font-bold text-orange-400 hover:text-orange-300 underline"
               >
-                Clear search filter
+                Reset filters
               </button>
             )}
           </div>
@@ -1670,32 +2632,206 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending }:
               <p className="text-zinc-500 text-sm mb-6">Paying for {getItemSummary(selectedOrder.items)} to {selectedOrder.supplier}</p>
               <form onSubmit={handlePayment} className="space-y-4">
                 <div>
-                  <label className="block text-xs font-bold text-zinc-500 uppercase mb-2">Amount (Max: ₹{selectedOrder.remaining_amount})</label>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-xs font-bold text-zinc-500 uppercase">Amount (Max: ₹{selectedOrder.remaining_amount.toLocaleString('en-IN')})</label>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        const input = (e.currentTarget.closest('form')?.querySelector('input[name="amount"]') as HTMLInputElement);
+                        if (input) input.value = String(selectedOrder.remaining_amount);
+                      }}
+                      className="text-[11px] font-bold text-orange-400 hover:text-orange-300 transition-colors"
+                    >
+                      Fill Full Balance (₹{selectedOrder.remaining_amount.toLocaleString('en-IN')})
+                    </button>
+                  </div>
                   <input 
                     name="amount" 
                     type="number" 
                     inputMode="decimal"
+                    defaultValue={selectedOrder.remaining_amount}
                     max={selectedOrder.remaining_amount} 
                     placeholder="0.00" 
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-xl font-bold no-spinner" 
+                    className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-xl font-bold text-white no-spinner focus:outline-none focus:ring-2 focus:ring-orange-500" 
                     required 
                   />
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-bold text-zinc-500 uppercase mb-2">Payment Mode</label>
-                    <select name="payment_type" className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm">
+                    <select name="payment_type" className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-orange-500">
                       {PAYMENT_TYPES.map(p => <option key={p} value={p}>{p}</option>)}
                     </select>
                   </div>
                   <div>
                     <label className="block text-xs font-bold text-zinc-500 uppercase mb-2">Date</label>
-                    <input name="date" type="date" defaultValue={format(new Date(), 'yyyy-MM-dd')} className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm" required />
+                    <input name="date" type="date" defaultValue={format(new Date(), 'yyyy-MM-dd')} className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-orange-500" required />
                   </div>
                 </div>
                 <div className="flex gap-4 pt-4">
-                  <button type="button" onClick={() => setSelectedOrder(null)} className="flex-1 bg-zinc-800 py-4 rounded-2xl font-bold text-sm">Cancel</button>
-                  <button type="submit" className="flex-1 bg-green-600 py-4 rounded-2xl font-bold text-sm">Confirm Payment</button>
+                  <button type="button" onClick={() => setSelectedOrder(null)} className="flex-1 bg-zinc-800 hover:bg-zinc-700 py-4 rounded-2xl font-bold text-sm text-zinc-300 transition-colors">Cancel</button>
+                  <button type="submit" className="flex-1 bg-green-600 hover:bg-green-500 py-4 rounded-2xl font-bold text-sm text-white shadow-lg shadow-green-600/20 transition-all">Confirm Payment</button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Settle & Mark Completed Modal for Selected Orders */}
+      <AnimatePresence>
+        {showSettleModal && (
+          <div 
+            className="fixed inset-0 z-[105] flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/75 backdrop-blur-md"
+            onClick={() => setShowSettleModal(false)}
+          >
+            <motion.div 
+              initial={{ y: '100%', opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: '100%', opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-zinc-900 w-full max-w-2xl rounded-t-[36px] sm:rounded-[36px] p-6 sm:p-8 border-t sm:border border-zinc-800 shadow-2xl overflow-hidden max-h-[90vh] flex flex-col pb-28 sm:pb-8"
+            >
+              {/* Modal Header */}
+              <div className="flex items-start justify-between gap-4 mb-4 shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="w-11 h-11 rounded-2xl bg-green-500/15 border border-green-500/30 flex items-center justify-center text-green-400">
+                    <CheckCheck className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-bold text-white">Settle & Mark Orders Completed</h2>
+                    <p className="text-xs text-zinc-400 mt-0.5">
+                      Review pending balances and confirm payments to mark all {selectedOrders.length} selected order(s) as Completed.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowSettleModal(false)}
+                  className="p-2 rounded-xl text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors shrink-0"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Order Rows with Details */}
+              <div className="overflow-y-auto flex-1 pr-1 space-y-2.5 my-2">
+                <div className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 px-1 flex items-center justify-between">
+                  <span>Selected Orders ({selectedOrders.length})</span>
+                  <span>Pending Balances</span>
+                </div>
+
+                {selectedOrders.map((order: Order, index: number) => {
+                  const hasBalance = Number(order.remaining_amount) > 0;
+                  return (
+                    <div 
+                      key={order.order_id} 
+                      className="bg-zinc-800/40 border border-zinc-800 rounded-2xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:border-zinc-750 transition-colors"
+                    >
+                      <div className="flex items-start gap-3 min-w-0">
+                        <span className="w-6 h-6 rounded-full bg-zinc-800 text-zinc-400 text-xs font-bold flex items-center justify-center shrink-0 mt-0.5">
+                          {index + 1}
+                        </span>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-white text-sm truncate">{order.supplier}</span>
+                            <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider shrink-0 ${
+                              order.status === 'Completed' ? 'bg-green-500/10 text-green-400' :
+                              order.status === 'Partial' ? 'bg-orange-500/10 text-orange-400' : 'bg-zinc-800 text-zinc-400'
+                            }`}>
+                              {order.status}
+                            </span>
+                          </div>
+                          <p className="text-xs text-zinc-400 truncate mt-0.5">
+                            {getItemSummary(order.items || [])} • {format(parseISO(order.date), 'dd MMM yyyy')}
+                          </p>
+                          <div className="flex items-center gap-3 text-[11px] text-zinc-500 mt-1">
+                            <span>Total: <strong className="text-zinc-300 font-semibold">₹{Number(order.total_amount).toLocaleString('en-IN')}</strong></span>
+                            <span>•</span>
+                            <span>Paid: <strong className="text-green-400 font-semibold">₹{Number(order.paid_amount).toLocaleString('en-IN')}</strong></span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="text-right sm:text-right shrink-0 border-t sm:border-t-0 pt-2 sm:pt-0 border-zinc-800/60 flex sm:flex-col justify-between sm:justify-center items-center sm:items-end">
+                        <span className="text-[10px] text-zinc-500 uppercase font-bold sm:mb-0.5">Balance To Pay</span>
+                        <span className={`text-base font-bold ${hasBalance ? 'text-red-400' : 'text-green-400'}`}>
+                          ₹{Number(order.remaining_amount).toLocaleString('en-IN')}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Total Balance Summary Box */}
+              <div className="bg-zinc-800/70 border border-zinc-700/60 rounded-2xl p-4 my-2 shrink-0">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold uppercase tracking-wider text-zinc-400 block">Total Balance To Settle</span>
+                    <span className="text-xs text-zinc-500">
+                      {ordersWithPendingBalance.length} order(s) require payment entries
+                    </span>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-2xl font-bold text-orange-400">
+                      ₹{ordersWithPendingBalance.reduce((sum, o) => sum + Number(o.remaining_amount), 0).toLocaleString('en-IN')}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Payment Details Form */}
+              <form onSubmit={handleConfirmSettlePayments} className="space-y-4 shrink-0 pt-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-bold text-zinc-400 uppercase mb-1.5">Payment Mode for Entries</label>
+                    <select 
+                      value={settlePaymentType}
+                      onChange={(e) => setSettlePaymentType(e.target.value)}
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                    >
+                      {PAYMENT_TYPES.map(p => <option key={p} value={p}>{p}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-zinc-400 uppercase mb-1.5">Payment Date</label>
+                    <input 
+                      type="date" 
+                      value={settleDate}
+                      onChange={(e) => setSettleDate(e.target.value)}
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                      required 
+                    />
+                  </div>
+                </div>
+
+                <div className="flex gap-3 pt-2">
+                  <button 
+                    type="button" 
+                    onClick={() => setShowSettleModal(false)}
+                    disabled={isSettling}
+                    className="flex-1 bg-zinc-800 hover:bg-zinc-700 py-3.5 rounded-2xl font-bold text-sm text-zinc-300 transition-colors disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    type="submit" 
+                    disabled={isSettling}
+                    className="flex-[1.5] bg-green-600 hover:bg-green-500 active:scale-95 py-3.5 rounded-2xl font-bold text-sm text-white shadow-lg shadow-green-600/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {isSettling ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        <span>Recording Payments...</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCheck className="w-4 h-4" />
+                        <span>Confirm & Complete All ({selectedOrders.length})</span>
+                      </>
+                    )}
+                  </button>
                 </div>
               </form>
             </motion.div>
@@ -1880,89 +3016,6 @@ function ReportsModule({ transactions, orders, showToast }: any) {
     return Object.entries(counts).map(([name, value]) => ({ name, value }));
   }, [transactions]);
 
-  const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
-    const bytes = new Uint8Array(buffer);
-    const chunkSize = 0x8000;
-    let binary = '';
-    for (let index = 0; index < bytes.length; index += chunkSize) {
-      binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
-    }
-    return window.btoa(binary);
-  };
-
-  // Helper to safely trigger a browser download for Web / Desktop
-  const downloadBlobFallback = (blob: Blob, filename: string) => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => {
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    }, 1000);
-  };
-
-  // Native Android & iOS Capacitor export/share handler
-  const saveOrShareReport = async (base64Data: string, filename: string, mimeType: string): Promise<boolean> => {
-    if (!Capacitor.isNativePlatform()) {
-      return false;
-    }
-
-    try {
-      const cleanBase64 = base64Data.includes('base64,')
-        ? base64Data.split('base64,')[1]
-        : base64Data;
-
-      // 1. Write file to application Cache directory
-      const writeResult = await Filesystem.writeFile({
-        path: filename,
-        data: cleanBase64,
-        directory: Directory.Cache,
-        recursive: true,
-      });
-
-      // 2. Get file URI
-      const uriResult = await Filesystem.getUri({
-        directory: Directory.Cache,
-        path: filename,
-      });
-
-      const fileUri = uriResult.uri || writeResult.uri;
-
-      // 3. Share with files array (Crucial for Android FileProvider & iOS)
-      try {
-        await Share.share({
-          title: filename,
-          text: `KhataBook Report: ${filename}`,
-          files: [fileUri],
-          dialogTitle: `Share or Save ${mimeType.includes('pdf') ? 'PDF' : 'Excel'} Report`,
-        });
-      } catch (shareErr: any) {
-        // Fallback for older share implementations
-        const errStr = String(shareErr?.message || '').toLowerCase();
-        if (errStr.includes('cancel') || errStr.includes('dismiss') || errStr.includes('abort')) {
-          return true; // user closed sheet
-        }
-        await Share.share({
-          title: filename,
-          url: fileUri,
-          dialogTitle: `Save ${filename}`,
-        });
-      }
-      return true;
-    } catch (err: any) {
-      console.warn('Native report share/save error:', err);
-      const errMsg = String(err?.message || '').toLowerCase();
-      if (errMsg.includes('cancel') || errMsg.includes('dismiss') || errMsg.includes('abort')) {
-        return true;
-      }
-      return false;
-    }
-  };
-
   const exportPDF = async () => {
     if (isExportingPdf) return;
     setIsExportingPdf(true);
@@ -2090,7 +3143,8 @@ function ReportsModule({ transactions, orders, showToast }: any) {
       const isHandledNatively = await saveOrShareReport(
         pdfBase64,
         filename,
-        'application/pdf'
+        'application/pdf',
+        pdfArrayBuffer
       );
 
       if (!isHandledNatively) {
@@ -2162,15 +3216,16 @@ function ReportsModule({ transactions, orders, showToast }: any) {
 
       const filename = `KhataBook_Report_${format(new Date(), 'yyyyMMdd_HHmm')}.xlsx`;
       const excelBase64 = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
+      const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
 
       const isHandledNatively = await saveOrShareReport(
         excelBase64,
         filename,
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        excelBuffer
       );
 
       if (!isHandledNatively) {
-        const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
         const excelBlob = new Blob([excelBuffer], { 
           type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
         });
@@ -2307,6 +3362,7 @@ function AdminModule({ apiLink, setApiLink, transactions, orders, showToast, isA
     await db.transactions.clear();
     await db.orders.clear();
     await db.orderPayments.clear();
+    await db.deletedRecords.clear();
     resetSyncState();
     window.location.reload();
   };
