@@ -76,7 +76,7 @@ import {
 import jsPDF from 'jspdf';
 import { autoTable } from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Directory, Filesystem } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 
@@ -90,17 +90,101 @@ const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8'];
 const SYNC_PENDING_KEY = 'BT_PENDING_SYNC';
 const LAST_SYNC_AT_KEY = 'BT_LAST_SYNC_AT';
 
+// --- Native Permissions Plugin Interface ---
+
+interface AppPermissionsPluginType {
+  checkStoragePermission(): Promise<{ granted: boolean }>;
+  requestStoragePermission(): Promise<{ granted: boolean }>;
+}
+
+const AppPermissions = registerPlugin<AppPermissionsPluginType>('AppPermissions');
+
+export const checkAppStoragePermission = async (): Promise<boolean> => {
+  if (!Capacitor.isNativePlatform()) return true;
+  try {
+    const res = await AppPermissions.checkStoragePermission();
+    if (res && typeof res.granted === 'boolean') {
+      return res.granted;
+    }
+  } catch (err) {
+    console.warn('AppPermissions checkStoragePermission error:', err);
+  }
+
+  try {
+    if (typeof Filesystem.checkPermissions === 'function') {
+      const fsPerm = await Filesystem.checkPermissions();
+      return fsPerm.publicStorage === 'granted';
+    }
+  } catch (err) {
+    console.warn('Filesystem.checkPermissions error:', err);
+  }
+  return false;
+};
+
+export const requestAppStoragePermission = async (showToast?: (msg: string, type: 'success' | 'error') => void): Promise<boolean> => {
+  if (!Capacitor.isNativePlatform()) return true;
+
+  try {
+    const isAlreadyGranted = await checkAppStoragePermission();
+    if (isAlreadyGranted) {
+      return true;
+    }
+
+    // Trigger standard Android system permission prompt ("Allow KhataBook to access photos and media / files on your device?")
+    try {
+      const res = await AppPermissions.requestStoragePermission();
+      if (res && res.granted) {
+        showToast?.('Storage permission granted!', 'success');
+        return true;
+      }
+    } catch (pluginErr) {
+      console.warn('AppPermissions request error, trying Filesystem fallback:', pluginErr);
+    }
+
+    try {
+      if (typeof Filesystem.requestPermissions === 'function') {
+        const fsRes = await Filesystem.requestPermissions();
+        if (fsRes && fsRes.publicStorage === 'granted') {
+          showToast?.('Storage permission granted!', 'success');
+          return true;
+        }
+      }
+    } catch (fsErr) {
+      console.warn('Filesystem.requestPermissions error:', fsErr);
+    }
+  } catch (e) {
+    console.warn('Failed to request permission:', e);
+  }
+
+  return false;
+};
+
 // --- Shared File, PDF & Native Share Utilities ---
 
 let cachedFontBase64: string | null = null;
 let fontLoadAttempted = false;
 
+const blobToBase64 = (blob: Blob): Promise<string> => {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = (reader.result as string) || '';
+      const base64 = result.includes('base64,') ? result.split('base64,')[1] : result;
+      resolve(base64);
+    };
+    reader.onerror = () => resolve('');
+    reader.readAsDataURL(blob);
+  });
+};
+
 const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
   const bytes = new Uint8Array(buffer);
-  const chunkSize = 0x8000;
   let binary = '';
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  const len = bytes.byteLength;
+  const chunkSize = 1024;
+  for (let i = 0; i < len; i += chunkSize) {
+    const slice = bytes.subarray(i, Math.min(i + chunkSize, len));
+    binary += String.fromCharCode.apply(null, slice as unknown as number[]);
   }
   return window.btoa(binary);
 };
@@ -110,7 +194,8 @@ const loadAppFont = async (doc: jsPDF): Promise<{ fontName: string, cur: string 
     try {
       doc.addFileToVFS('Nirmala.ttf', cachedFontBase64);
       doc.addFont('Nirmala.ttf', 'Nirmala', 'normal');
-      doc.setFont('Nirmala');
+      doc.addFont('Nirmala.ttf', 'Nirmala', 'bold');
+      doc.setFont('Nirmala', 'normal');
       return { fontName: 'Nirmala', cur: '₹' };
     } catch {
       return { fontName: 'helvetica', cur: 'Rs. ' };
@@ -124,17 +209,20 @@ const loadAppFont = async (doc: jsPDF): Promise<{ fontName: string, cur: string 
   fontLoadAttempted = true;
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 1200);
+    const timeoutId = setTimeout(() => controller.abort(), 1500);
     const res = await fetch('/fonts/Nirmala.ttf', { signal: controller.signal });
     clearTimeout(timeoutId);
     if (res.ok) {
-      const buf = await res.arrayBuffer();
-      if (buf && buf.byteLength > 0) {
-        cachedFontBase64 = arrayBufferToBase64(buf);
-        doc.addFileToVFS('Nirmala.ttf', cachedFontBase64);
-        doc.addFont('Nirmala.ttf', 'Nirmala', 'normal');
-        doc.setFont('Nirmala');
-        return { fontName: 'Nirmala', cur: '₹' };
+      const blob = await res.blob();
+      if (blob && blob.size > 0) {
+        cachedFontBase64 = await blobToBase64(blob);
+        if (cachedFontBase64) {
+          doc.addFileToVFS('Nirmala.ttf', cachedFontBase64);
+          doc.addFont('Nirmala.ttf', 'Nirmala', 'normal');
+          doc.addFont('Nirmala.ttf', 'Nirmala', 'bold');
+          doc.setFont('Nirmala', 'normal');
+          return { fontName: 'Nirmala', cur: '₹' };
+        }
       }
     }
   } catch (err) {
@@ -167,7 +255,8 @@ const saveOrShareReport = async (
   base64Data: string, 
   filename: string, 
   mimeType: string,
-  rawArrayBuffer?: ArrayBuffer
+  rawArrayBuffer?: ArrayBuffer,
+  showToast?: (msg: string, type: 'success' | 'error') => void
 ): Promise<boolean> => {
   const cleanBase64 = base64Data.includes('base64,')
     ? base64Data.split('base64,')[1]
@@ -176,7 +265,7 @@ const saveOrShareReport = async (
   // 1. Native Capacitor Android & iOS
   if (Capacitor.isNativePlatform()) {
     try {
-      // Step 1: Write directly to App Cache Directory (always permitted without runtime permission prompts)
+      // Step 1: Write directly to Cache directory (100% private to app, requires NO runtime storage permissions)
       let fileUri = '';
       try {
         const writeResult = await Filesystem.writeFile({
@@ -210,26 +299,47 @@ const saveOrShareReport = async (
         }
       }
 
-      // Step 2: Open Native Android System Share & Print Dialog
+      // Step 2: Background copy to Documents directory if storage permission is already granted
+      try {
+        const hasPerm = await checkAppStoragePermission();
+        if (hasPerm) {
+          Filesystem.writeFile({
+            path: filename,
+            data: cleanBase64,
+            directory: Directory.Documents,
+            recursive: true,
+          }).catch((e) => console.warn('Documents directory background copy:', e));
+        }
+      } catch {}
+
+      // Step 3: Open Native Android System Share & Print Dialog
       if (fileUri) {
+        const validFileUri = fileUri.startsWith('file:') ? fileUri : `file://${fileUri}`;
         try {
           await Share.share({
             title: filename,
             text: `KhataBook: ${filename}`,
-            files: [fileUri],
+            files: [validFileUri],
             dialogTitle: `Share or Print ${filename}`,
           });
           return true;
         } catch (shareErr: any) {
           const errStr = String(shareErr?.message || '').toLowerCase();
-          if (errStr.includes('cancel') || errStr.includes('dismiss') || errStr.includes('abort') || errStr.includes('user cancelled')) {
+          if (
+            errStr.includes('cancel') || 
+            errStr.includes('dismiss') || 
+            errStr.includes('abort') || 
+            errStr.includes('user cancelled') ||
+            errStr.includes('share canceled')
+          ) {
+            // User intentionally closed the sheet
             return true;
           }
           // Fallback share with URL parameter
           try {
             await Share.share({
               title: filename,
-              url: fileUri,
+              url: validFileUri,
               dialogTitle: `Share ${filename}`,
             });
             return true;
@@ -239,24 +349,14 @@ const saveOrShareReport = async (
         }
       }
 
-      // Step 3: Optional permanent Documents save in background (never blocks or crashes UI)
-      try {
-        Filesystem.writeFile({
-          path: filename,
-          data: cleanBase64,
-          directory: Directory.Documents,
-          recursive: true,
-        }).catch(() => {});
-      } catch {}
-
-      return true;
+      return false;
     } catch (err: any) {
       console.warn('Native file share/save error:', err);
       return false;
     }
   }
 
-  // 2. Web / Mobile Browser
+  // 2. Web / Mobile Browser Fallback
   try {
     let blob: Blob;
     if (rawArrayBuffer) {
@@ -274,12 +374,12 @@ const saveOrShareReport = async (
     // Trigger device browser download
     downloadBlobFallback(blob, filename);
 
-    // Next, if Mobile Web Share is supported, also prompt the share sheet
-    if (typeof navigator !== 'undefined' && navigator.share) {
+    // If Mobile Web Share is supported, also prompt share sheet
+    if (typeof navigator !== 'undefined' && (navigator as any).share) {
       try {
         const file = new File([blob], filename, { type: mimeType });
-        if (navigator.canShare && navigator.canShare({ files: [file] })) {
-          await navigator.share({
+        if ((navigator as any).canShare && (navigator as any).canShare({ files: [file] })) {
+          await (navigator as any).share({
             title: filename,
             text: `KhataBook: ${filename}`,
             files: [file],
@@ -384,6 +484,7 @@ const generateAndShareOrderReceipts = async (ordersList: Order[], showToast?: an
         theme: 'grid',
         styles: {
           font: activeFont,
+          fontStyle: 'normal',
           fontSize: 8,
           textColor: [39, 39, 42],
           lineColor: [228, 228, 231],
@@ -392,13 +493,13 @@ const generateAndShareOrderReceipts = async (ordersList: Order[], showToast?: an
         },
         headStyles: {
           font: activeFont,
+          fontStyle: 'normal',
           fillColor: [234, 88, 12],
           textColor: [255, 255, 255],
           lineColor: [194, 65, 12],
           lineWidth: 0.15,
-          fontStyle: 'normal',
         },
-        alternateRowStyles: { fillColor: [250, 250, 250] },
+        alternateRowStyles: { fillColor: [250, 250, 250], fontStyle: 'normal' },
         columnStyles: {
           0: { cellWidth: 12, halign: 'center' },
           1: { cellWidth: 'auto' },
@@ -519,6 +620,7 @@ const generateAndShareOrderReceipts = async (ordersList: Order[], showToast?: an
         theme: 'grid',
         styles: {
           font: activeFont,
+          fontStyle: 'normal',
           fontSize: 7,
           textColor: [39, 39, 42],
           lineColor: [228, 228, 231],
@@ -527,13 +629,13 @@ const generateAndShareOrderReceipts = async (ordersList: Order[], showToast?: an
         },
         headStyles: {
           font: activeFont,
+          fontStyle: 'normal',
           fillColor: [234, 88, 12],
           textColor: [255, 255, 255],
           lineColor: [194, 65, 12],
           lineWidth: 0.15,
-          fontStyle: 'normal',
         },
-        alternateRowStyles: { fillColor: [250, 250, 250] },
+        alternateRowStyles: { fillColor: [250, 250, 250], fontStyle: 'normal' },
         columnStyles: {
           0: { cellWidth: 8, halign: 'center' },
           1: { cellWidth: 26 },
@@ -545,7 +647,7 @@ const generateAndShareOrderReceipts = async (ordersList: Order[], showToast?: an
           7: { cellWidth: 20, halign: 'right' },
         },
         didDrawPage: (data) => {
-          doc.setFont(activeFont);
+          doc.setFont(activeFont, 'normal');
           doc.setFontSize(7.5);
           doc.setTextColor(113, 113, 122);
           doc.text(`Page ${data.pageNumber} • KhataBook Mobile Pro`, 190, 288, { align: 'right' });
@@ -557,19 +659,20 @@ const generateAndShareOrderReceipts = async (ordersList: Order[], showToast?: an
       ? `Order_Receipt_${(ordersList[0].supplier || 'Supplier').replace(/[^a-zA-Z0-9]/g, '_')}_${format(new Date(), 'yyyyMMdd_HHmm')}.pdf`
       : `Orders_Summary_${ordersList.length}Orders_${format(new Date(), 'yyyyMMdd_HHmm')}.pdf`;
 
-    const pdfArrayBuffer = doc.output('arraybuffer');
-    const pdfBase64 = arrayBufferToBase64(pdfArrayBuffer);
+    const pdfBlob = doc.output('blob');
+    const pdfBase64 = await blobToBase64(pdfBlob);
+    const pdfArrayBuffer = await pdfBlob.arrayBuffer();
 
     // Share or Save
     const isHandled = await saveOrShareReport(
       pdfBase64,
       filename,
       'application/pdf',
-      pdfArrayBuffer
+      pdfArrayBuffer,
+      showToast
     );
 
     if (!isHandled) {
-      const pdfBlob = new Blob([pdfArrayBuffer], { type: 'application/pdf' });
       downloadBlobFallback(pdfBlob, filename);
     }
 
@@ -698,6 +801,7 @@ const generateAndSharePassbookPDF = async (
       theme: 'grid',
       styles: {
         font: activeFont,
+        fontStyle: 'normal',
         fontSize: 7,
         textColor: [39, 39, 42],
         lineColor: [228, 228, 231],
@@ -706,13 +810,13 @@ const generateAndSharePassbookPDF = async (
       },
       headStyles: {
         font: activeFont,
+        fontStyle: 'normal',
         fillColor: [234, 88, 12],
         textColor: [255, 255, 255],
         lineColor: [194, 65, 12],
         lineWidth: 0.15,
-        fontStyle: 'normal',
       },
-      alternateRowStyles: { fillColor: [250, 250, 250] },
+      alternateRowStyles: { fillColor: [250, 250, 250], fontStyle: 'normal' },
       columnStyles: {
         0: { cellWidth: 8, halign: 'center' },
         1: { cellWidth: 30 },
@@ -723,7 +827,7 @@ const generateAndSharePassbookPDF = async (
         6: { cellWidth: 24, halign: 'right' },
       },
       didDrawPage: (data) => {
-        doc.setFont(activeFont);
+        doc.setFont(activeFont, 'normal');
         doc.setFontSize(7.5);
         doc.setTextColor(113, 113, 122);
         doc.text(`Page ${data.pageNumber} • KhataBook Mobile Pro Passbook`, 190, 288, { align: 'right' });
@@ -731,18 +835,19 @@ const generateAndSharePassbookPDF = async (
     });
 
     const filename = `Passbook_Statement_${periodLabel.replace(/[^a-zA-Z0-9]/g, '_')}_${format(new Date(), 'yyyyMMdd_HHmm')}.pdf`;
-    const pdfArrayBuffer = doc.output('arraybuffer');
-    const pdfBase64 = arrayBufferToBase64(pdfArrayBuffer);
+    const pdfBlob = doc.output('blob');
+    const pdfBase64 = await blobToBase64(pdfBlob);
+    const pdfArrayBuffer = await pdfBlob.arrayBuffer();
 
     const isHandled = await saveOrShareReport(
       pdfBase64,
       filename,
       'application/pdf',
-      pdfArrayBuffer
+      pdfArrayBuffer,
+      showToast
     );
 
     if (!isHandled) {
-      const pdfBlob = new Blob([pdfArrayBuffer], { type: 'application/pdf' });
       downloadBlobFallback(pdfBlob, filename);
     }
 
@@ -3791,6 +3896,7 @@ function ReportsModule({ transactions, orders, showToast }: any) {
         theme: 'grid',
         styles: {
           font: activeFont,
+          fontStyle: 'normal',
           fontSize: 7,
           textColor: [39, 39, 42],
           lineColor: [212, 212, 216],
@@ -3799,13 +3905,13 @@ function ReportsModule({ transactions, orders, showToast }: any) {
         },
         headStyles: {
           font: activeFont,
+          fontStyle: 'normal',
           fillColor: [234, 88, 12],
           textColor: [255, 255, 255],
           lineColor: [194, 65, 12],
           lineWidth: 0.15,
-          fontStyle: 'normal',
         },
-        alternateRowStyles: { fillColor: [250, 250, 250] },
+        alternateRowStyles: { fillColor: [250, 250, 250], fontStyle: 'normal' },
         columnStyles: {
           0: { cellWidth: 31 },
           1: { cellWidth: 18 },
@@ -3815,7 +3921,7 @@ function ReportsModule({ transactions, orders, showToast }: any) {
           5: { cellWidth: 'auto' },
         },
         didDrawPage: (data) => {
-          doc.setFont(activeFont);
+          doc.setFont(activeFont, 'normal');
           doc.setFontSize(8);
           doc.setTextColor(113, 113, 122);
           doc.text(`Page ${data.pageNumber}`, 190, 288, { align: 'right' });
@@ -3823,18 +3929,19 @@ function ReportsModule({ transactions, orders, showToast }: any) {
       });
 
       const filename = `KhataBook_Report_${format(new Date(), 'yyyyMMdd_HHmm')}.pdf`;
-      const pdfArrayBuffer = doc.output('arraybuffer');
-      const pdfBase64 = arrayBufferToBase64(pdfArrayBuffer);
+      const pdfBlob = doc.output('blob');
+      const pdfBase64 = await blobToBase64(pdfBlob);
+      const pdfArrayBuffer = await pdfBlob.arrayBuffer();
 
       const isHandledNatively = await saveOrShareReport(
         pdfBase64,
         filename,
         'application/pdf',
-        pdfArrayBuffer
+        pdfArrayBuffer,
+        showToast
       );
 
       if (!isHandledNatively) {
-        const pdfBlob = new Blob([pdfArrayBuffer], { type: 'application/pdf' });
         downloadBlobFallback(pdfBlob, filename);
       }
 
@@ -3908,7 +4015,8 @@ function ReportsModule({ transactions, orders, showToast }: any) {
         excelBase64,
         filename,
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        excelBuffer
+        excelBuffer,
+        showToast
       );
 
       if (!isHandledNatively) {
@@ -4028,6 +4136,13 @@ function AdminModule({ apiLink, setApiLink, transactions, orders, showToast, isA
   const [showGoogleResetConfirm, setShowGoogleResetConfirm] = useState(false);
   const [isResettingGoogleSheet, setIsResettingGoogleSheet] = useState(false);
   const [syncButtonLabel, setSyncButtonLabel] = useState('Sync Data');
+  const [storagePermState, setStoragePermState] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (Capacitor.isNativePlatform()) {
+      checkAppStoragePermission().then(granted => setStoragePermState(granted));
+    }
+  }, []);
 
   const handleSaveApi = () => {
     localStorage.setItem('BT_API_LINK', apiLink);
@@ -4119,6 +4234,42 @@ function AdminModule({ apiLink, setApiLink, transactions, orders, showToast, isA
               />
             </button>
           </div>
+
+          {/* Device Storage Permission (Android) */}
+          {Capacitor.isNativePlatform() && (
+            <div className="group flex items-center justify-between p-4 sm:p-6 bg-zinc-800/30 rounded-[32px] border border-zinc-800/50 hover:border-blue-500/30 transition-all gap-4">
+              <div className="flex-1">
+                <div className="flex items-center gap-2 mb-1">
+                  <p className="font-bold text-base sm:text-lg">Storage Permission</p>
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${storagePermState ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'}`}>
+                    {storagePermState ? 'Granted' : 'Permission Needed'}
+                  </span>
+                </div>
+                <p className="text-[10px] sm:text-xs text-zinc-500 leading-relaxed max-w-[200px] sm:max-w-[280px]">
+                  Required for saving PDF passbooks, receipts, and Excel reports directly to device storage.
+                </p>
+              </div>
+              <button 
+                type="button"
+                onClick={async () => {
+                  const granted = await requestAppStoragePermission(showToast);
+                  setStoragePermState(granted);
+                  if (granted) {
+                    showToast('Storage permission granted!', 'success');
+                  } else {
+                    showToast('Storage permission not granted', 'error');
+                  }
+                }}
+                className={`px-4 py-2.5 rounded-2xl font-bold text-xs transition-all shrink-0 ${
+                  storagePermState 
+                    ? 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700' 
+                    : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/20 active:scale-95'
+                }`}
+              >
+                {storagePermState ? 'Check Status' : 'Allow Permission'}
+              </button>
+            </div>
+          )}
 
           {/* API Link Section */}
           <div className="space-y-4">
