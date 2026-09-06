@@ -14,7 +14,7 @@ export interface Transaction {
 }
 
 export interface OrderItem {
-  id: string;
+  id?: string;
   material: string;
   quantity: string;
   amount: number;
