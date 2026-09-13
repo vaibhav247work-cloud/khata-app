@@ -59,7 +59,8 @@ import {
   startOfYear,
   endOfYear,
   isWithinInterval, 
-  parseISO 
+  parseISO,
+  differenceInCalendarDays 
 } from 'date-fns';
 import { 
   BarChart, 
@@ -80,6 +81,8 @@ import { Capacitor } from '@capacitor/core';
 import { Directory, Filesystem } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { PdfPreviewModal, type PdfPreviewData } from './components/PdfPreviewModal';
+import { OrderHistorySection } from './components/OrderHistorySection';
+import { OrderDetailsModal } from './components/OrderDetailsModal';
 import { backHandler, useBackHandler } from './utils/backHandler';
 
 // --- Types & Constants ---
@@ -2238,9 +2241,10 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
   const [showAdd, setShowAdd] = useState(false);
   const [editingOrder, setEditingOrder] = useState<Order | null>(null);
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
+  const [viewingOrderDetails, setViewingOrderDetails] = useState<Order | null>(null);
   const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
   const [orderSearchQuery, setOrderSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'All' | 'Pending' | 'Partial' | 'Completed'>('All');
+  const [statusFilter, setStatusFilter] = useState<'All' | 'Pending' | 'Partial' | 'Completed' | 'Overdue'>('All');
   const [sortAsc, setSortAsc] = useState(false); // false = newest date first, true = oldest date first
   const createEmptyOrderItem = (): OrderItem => ({ id: crypto.randomUUID(), material: '', quantity: '', amount: 0 });
   const [newItems, setNewItems] = useState<OrderItem[]>([createEmptyOrderItem()]);
@@ -2255,18 +2259,42 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
   const [settleDate, setSettleDate] = useState(() => format(new Date(), 'yyyy-MM-dd'));
   const [isSettling, setIsSettling] = useState(false);
 
+  const overdueOrdersCount = useMemo(() => {
+    const now = startOfDay(new Date());
+    return orders.filter((o: Order) => {
+      if (o.status !== 'Pending' && o.status !== 'Partial') return false;
+      try {
+        const days = differenceInCalendarDays(now, startOfDay(parseISO(o.date)));
+        return days > 7;
+      } catch {
+        return false;
+      }
+    }).length;
+  }, [orders]);
+
   const statusCounts = useMemo(() => ({
     All: orders.length,
     Pending: orders.filter((o: Order) => o.status === 'Pending').length,
     Partial: orders.filter((o: Order) => o.status === 'Partial').length,
     Completed: orders.filter((o: Order) => o.status === 'Completed').length,
-  }), [orders]);
+    Overdue: overdueOrdersCount,
+  }), [orders, overdueOrdersCount]);
 
   const filteredOrders = useMemo(() => {
     let result = [...orders];
 
     // Status filter
-    if (statusFilter !== 'All') {
+    if (statusFilter === 'Overdue') {
+      const now = startOfDay(new Date());
+      result = result.filter((o: Order) => {
+        if (o.status !== 'Pending' && o.status !== 'Partial') return false;
+        try {
+          return differenceInCalendarDays(now, startOfDay(parseISO(o.date))) > 7;
+        } catch {
+          return false;
+        }
+      });
+    } else if (statusFilter !== 'All') {
       result = result.filter((o: Order) => o.status === statusFilter);
     }
 
@@ -2522,6 +2550,21 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
   }, !!selectedOrder, 50);
 
   useBackHandler(() => {
+    setViewingOrderDetails(null);
+    return true;
+  }, !!viewingOrderDetails, 48);
+
+  // Synchronize viewingOrderDetails when orders list updates
+  useEffect(() => {
+    if (viewingOrderDetails) {
+      const fresh = orders.find((o: Order) => o.order_id === viewingOrderDetails.order_id);
+      if (fresh) {
+        setViewingOrderDetails(fresh);
+      }
+    }
+  }, [orders]);
+
+  useBackHandler(() => {
     setSelectedOrderIds(new Set());
     return true;
   }, selectedOrderIds.size > 0, 40);
@@ -2761,7 +2804,7 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
       <div className="flex flex-wrap items-center justify-between gap-2.5 pt-1">
         {/* Status Filter Tabs */}
         <div className="flex items-center gap-1 p-1 bg-zinc-900/90 border border-zinc-800/80 rounded-2xl overflow-x-auto max-w-full">
-          {(['All', 'Pending', 'Partial', 'Completed'] as const).map((tab) => {
+          {(['All', 'Pending', 'Partial', 'Completed', 'Overdue'] as const).map((tab) => {
             const count = statusCounts[tab];
             const isActive = statusFilter === tab;
             return (
@@ -2778,13 +2821,22 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
                       ? 'bg-orange-500/20 text-orange-400 border border-orange-500/40 shadow-sm'
                       : tab === 'Pending'
                       ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/40 shadow-sm'
+                      : tab === 'Overdue'
+                      ? 'bg-amber-500/25 text-amber-300 border border-amber-500/50 shadow-sm'
                       : 'bg-zinc-800 text-white border border-zinc-700 shadow-sm'
+                    : tab === 'Overdue' && count > 0
+                    ? 'text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 border border-amber-500/25'
                     : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40 border border-transparent'
                 }`}
               >
+                {tab === 'Overdue' && <AlertCircle className="w-3.5 h-3.5 shrink-0" />}
                 <span>{tab}</span>
                 <span className={`text-[10px] px-1.5 py-0.5 rounded-full leading-none font-bold ${
-                  isActive ? 'bg-white/15' : 'bg-zinc-800 text-zinc-500'
+                  isActive 
+                    ? 'bg-white/15' 
+                    : tab === 'Overdue' && count > 0 
+                    ? 'bg-amber-500/20 text-amber-300' 
+                    : 'bg-zinc-800 text-zinc-500'
                 }`}>
                   {count}
                 </span>
@@ -2805,6 +2857,27 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
           <span>{sortAsc ? 'Date: Oldest First' : 'Date: Newest First'}</span>
         </button>
       </div>
+
+      {/* Overdue Payment Alert Banner (Visible when there are overdue orders and not currently on Overdue tab) */}
+      {overdueOrdersCount > 0 && statusFilter !== 'Overdue' && (
+        <div 
+          onClick={() => setStatusFilter('Overdue')}
+          className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs cursor-pointer hover:bg-amber-500/15 transition-all shadow-sm group"
+          title="Click to view all overdue orders"
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="p-1 rounded-lg bg-amber-500/20 text-amber-300 shrink-0">
+              <Clock className="w-3.5 h-3.5" />
+            </span>
+            <span className="font-medium truncate">
+              <strong>{overdueOrdersCount} order{overdueOrdersCount > 1 ? 's have' : ' has'}</strong> pending payment for more than 7 days
+            </span>
+          </div>
+          <span className="text-[11px] font-bold text-amber-300 group-hover:text-amber-200 underline shrink-0">
+            Filter Overdue →
+          </span>
+        </div>
+      )}
 
       {/* Filtered Orders Financial Summary Row */}
       <div className="grid grid-cols-3 gap-3 bg-gradient-to-br from-zinc-900 via-zinc-900 to-zinc-950 border border-zinc-800/90 rounded-2xl p-4 shadow-sm">
@@ -2946,138 +3019,230 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
       {/* Orders List with Motion Entrance Animations */}
       <div className="grid gap-4">
         <AnimatePresence mode="popLayout">
-          {filteredOrders.map((order: Order) => (
-            <motion.div 
-              key={order.order_id} 
-              layout
-              initial={{ opacity: 0, y: 16, scale: 0.98 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95, transition: { duration: 0.15 } }}
-              transition={{ duration: 0.2 }}
-              className={`bg-zinc-900 border rounded-3xl p-6 relative group transition-all ${
-                selectedOrderIds.has(order.order_id)
-                  ? 'border-orange-500/60 shadow-lg shadow-orange-500/5'
-                  : 'border-zinc-800 hover:border-zinc-750'
-              }`}
-            >
-              <div className="absolute top-6 right-6 flex items-center gap-1.5">
-                <button
-                  id={`print-single-order-btn-${order.order_id}`}
-                  type="button"
-                  onClick={() => handlePrintOrders([order])}
-                  disabled={isPrinting}
-                  className="p-2 rounded-xl transition-all text-zinc-400 hover:text-orange-400 hover:bg-orange-500/10 disabled:opacity-50"
-                  title="Print / Share Receipt"
-                >
-                  {printingOrderId === order.order_id ? (
-                    <RefreshCw className="w-4 h-4 animate-spin text-orange-500" />
-                  ) : (
-                    <Printer className="w-4 h-4" />
-                  )}
-                </button>
-                <button
-                  id={`edit-order-btn-${order.order_id}`}
-                  type="button"
-                  onClick={() => openEditOrderForm(order)}
-                  className="p-2 rounded-xl transition-all text-zinc-400 hover:text-orange-400 hover:bg-orange-500/10"
-                  title="Edit Order"
-                >
-                  <Pencil className="w-4 h-4" />
-                </button>
-                <button 
-                  id={`delete-order-btn-${order.order_id}`}
-                  type="button"
-                  onClick={() => setOrderToDelete(order)}
-                  className={`p-2 rounded-xl transition-all ${
-                    (order.paid_amount || 0) === 0 
-                      ? 'text-zinc-400 hover:text-red-500 hover:bg-red-500/10 opacity-100' 
-                      : 'text-zinc-600 hover:text-red-500 hover:bg-red-500/10 opacity-0 group-hover:opacity-100'
-                  }`}
-                  title="Delete Order"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
+          {filteredOrders.map((order: Order) => {
+            const orderDateParsed = (() => {
+              try {
+                return parseISO(order.date);
+              } catch {
+                return new Date();
+              }
+            })();
+            const daysPending = differenceInCalendarDays(startOfDay(new Date()), startOfDay(orderDateParsed));
+            const isOverdue = (order.status === 'Pending' || order.status === 'Partial') && daysPending > 7;
 
-              <div className="flex items-start gap-3 mb-4 pr-28">
-                <button
-                  id={`select-order-checkbox-${order.order_id}`}
-                  type="button"
-                  onClick={(e) => toggleSelectOrder(order.order_id, e)}
-                  className={`w-5 h-5 mt-0.5 rounded-md border flex items-center justify-center shrink-0 transition-all ${
-                    selectedOrderIds.has(order.order_id)
-                      ? 'bg-orange-500 border-orange-500 text-white shadow-sm shadow-orange-500/30'
-                      : 'border-zinc-700 bg-zinc-800/60 hover:border-zinc-500 text-transparent hover:bg-zinc-800'
-                  }`}
-                  title={selectedOrderIds.has(order.order_id) ? 'Deselect order' : 'Select order for bulk actions / print'}
-                >
-                  <Check className={`w-3.5 h-3.5 stroke-[3] ${selectedOrderIds.has(order.order_id) ? 'opacity-100' : 'opacity-0'}`} />
-                </button>
+            return (
+              <motion.div 
+                key={order.order_id} 
+                layout
+                initial={{ opacity: 0, y: 16, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95, transition: { duration: 0.15 } }}
+                transition={{ duration: 0.2 }}
+                className={`bg-zinc-900 border rounded-3xl p-6 relative group transition-all ${
+                  selectedOrderIds.has(order.order_id)
+                    ? 'border-orange-500/60 shadow-lg shadow-orange-500/5'
+                    : isOverdue
+                    ? 'border-amber-500/40 bg-gradient-to-b from-amber-950/10 via-zinc-900 to-zinc-900 hover:border-amber-500/60 ring-1 ring-amber-500/20 shadow-sm'
+                    : 'border-zinc-800 hover:border-zinc-750'
+                }`}
+              >
+                {/* Header Row: Checkbox, Supplier & Badges, Actions Toolbar */}
+                <div className="flex items-start justify-between gap-3 mb-4">
+                  {/* Left: Checkbox + Supplier Info & Badges */}
+                  <div className="flex items-start gap-3 min-w-0 flex-1">
+                    <button
+                      id={`select-order-checkbox-${order.order_id}`}
+                      type="button"
+                      onClick={(e) => toggleSelectOrder(order.order_id, e)}
+                      className={`w-5 h-5 mt-0.5 rounded-md border flex items-center justify-center shrink-0 transition-all ${
+                        selectedOrderIds.has(order.order_id)
+                          ? 'bg-orange-500 border-orange-500 text-white shadow-sm shadow-orange-500/30'
+                          : 'border-zinc-700 bg-zinc-800/60 hover:border-zinc-500 text-transparent hover:bg-zinc-800'
+                      }`}
+                      title={selectedOrderIds.has(order.order_id) ? 'Deselect order' : 'Select order for bulk actions / print'}
+                    >
+                      <Check className={`w-3.5 h-3.5 stroke-[3] ${selectedOrderIds.has(order.order_id) ? 'opacity-100' : 'opacity-0'}`} />
+                    </button>
 
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-2">
-                    <h3 className="text-lg font-bold truncate text-white">{order.supplier}</h3>
-                    <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider shrink-0 ${
-                      order.status === 'Completed' ? 'bg-green-500/10 text-green-500' : 
-                      order.status === 'Partial' ? 'bg-orange-500/10 text-orange-500' : 'bg-zinc-800 text-zinc-500'
-                    }`}>
-                      {order.status}
+                    <div 
+                      className="flex-1 min-w-0 cursor-pointer"
+                      onClick={() => setViewingOrderDetails(order)}
+                      title="Click to view Order Details & History"
+                    >
+                      <div className="flex items-center gap-2 flex-wrap mb-1">
+                        <h3 className="text-lg font-bold truncate text-white hover:text-orange-400 transition-colors flex items-center gap-1.5">
+                          <span>{order.supplier}</span>
+                          <ChevronRight className="w-4 h-4 text-zinc-500 opacity-60 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all" />
+                        </h3>
+                        
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {isOverdue && (
+                            <span 
+                              className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-amber-500/15 text-amber-400 border border-amber-500/30 shrink-0 shadow-sm"
+                              title={`Order is ${order.status.toLowerCase()} for ${daysPending} days (>7 days limit)`}
+                            >
+                              <Clock className="w-3 h-3 text-amber-400 shrink-0" />
+                              <span>{daysPending}d Overdue</span>
+                            </span>
+                          )}
+                          <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider shrink-0 ${
+                            order.status === 'Completed' ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 
+                            order.status === 'Partial' ? 'bg-orange-500/10 text-orange-400 border border-orange-500/20' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                          }`}>
+                            {order.status}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 text-xs text-zinc-500">
+                        <span className="truncate">{getItemSummary(order.items || [])}</span>
+                        <span>•</span>
+                        <span className="shrink-0">{format(parseISO(order.date), 'dd MMM yyyy')}</span>
+                        {isOverdue && (
+                          <>
+                            <span>•</span>
+                            <span className="text-amber-400/90 font-medium shrink-0">
+                              {daysPending} days ago
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Right: Quick Action Buttons */}
+                  <div className="flex items-center gap-1 shrink-0 -mt-1 -mr-2">
+                    <button
+                      id={`view-order-history-btn-${order.order_id}`}
+                      type="button"
+                      onClick={() => setViewingOrderDetails(order)}
+                      className="p-2 rounded-xl transition-all text-zinc-400 hover:text-orange-400 hover:bg-orange-500/10"
+                      title="Order Details & History Log"
+                    >
+                      <History className="w-4 h-4" />
+                    </button>
+                    <button
+                      id={`print-single-order-btn-${order.order_id}`}
+                      type="button"
+                      onClick={() => handlePrintOrders([order])}
+                      disabled={isPrinting}
+                      className="p-2 rounded-xl transition-all text-zinc-400 hover:text-orange-400 hover:bg-orange-500/10 disabled:opacity-50"
+                      title="Print / Share Receipt"
+                    >
+                      {printingOrderId === order.order_id ? (
+                        <RefreshCw className="w-4 h-4 animate-spin text-orange-500" />
+                      ) : (
+                        <Printer className="w-4 h-4" />
+                      )}
+                    </button>
+                    <button
+                      id={`edit-order-btn-${order.order_id}`}
+                      type="button"
+                      onClick={() => openEditOrderForm(order)}
+                      className="p-2 rounded-xl transition-all text-zinc-400 hover:text-orange-400 hover:bg-orange-500/10"
+                      title="Edit Order"
+                    >
+                      <Pencil className="w-4 h-4" />
+                    </button>
+                    <button 
+                      id={`delete-order-btn-${order.order_id}`}
+                      type="button"
+                      onClick={() => setOrderToDelete(order)}
+                      className={`p-2 rounded-xl transition-all ${
+                        (order.paid_amount || 0) === 0 
+                          ? 'text-zinc-400 hover:text-red-500 hover:bg-red-500/10 opacity-100' 
+                          : 'text-zinc-600 hover:text-red-500 hover:bg-red-500/10 opacity-0 group-hover:opacity-100'
+                      }`}
+                      title="Delete Order"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Overdue Payment Notice Banner */}
+                {isOverdue && (
+                  <div className="mb-4 flex items-center justify-between gap-2 px-3.5 py-2 rounded-2xl bg-amber-500/10 border border-amber-500/25 text-xs text-amber-400">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      <span className="font-semibold truncate">Potential Overdue Payment</span>
+                    </div>
+                    <span className="text-[11px] font-medium text-amber-300/90 shrink-0">
+                      {daysPending} days since order
                     </span>
                   </div>
-                  <div className="flex items-center gap-2 mt-0.5 text-xs text-zinc-500">
-                    <span className="truncate">{getItemSummary(order.items || [])}</span>
-                    <span>•</span>
-                    <span className="shrink-0">{format(parseISO(order.date), 'dd MMM yyyy')}</span>
-                  </div>
-                </div>
-              </div>
+                )}
 
-              {/* Items List */}
-              <div className="mb-6 space-y-2">
-                {(order.items || []).map((item) => (
-                  <div key={item.id} className="flex justify-between text-xs border-b border-zinc-800 pb-2 last:border-0">
-                    <div className="flex flex-col">
-                      <span className="font-medium text-zinc-300">{item.material}</span>
-                      <span className="text-zinc-500">{item.quantity}</span>
+                {/* Items List */}
+                <div className="mb-6 space-y-2">
+                  {(order.items || []).map((item) => (
+                    <div key={item.id} className="flex justify-between text-xs border-b border-zinc-800 pb-2 last:border-0">
+                      <div className="flex flex-col">
+                        <span className="font-medium text-zinc-300">{item.material}</span>
+                        <span className="text-zinc-500">{item.quantity}</span>
+                      </div>
+                      <span className="font-bold">₹{item.amount.toLocaleString('en-IN')}</span>
                     </div>
-                    <span className="font-bold">₹{item.amount.toLocaleString('en-IN')}</span>
+                  ))}
+                </div>
+                
+                <div className="grid grid-cols-3 gap-4 mb-6">
+                  <div>
+                    <p className="text-zinc-500 text-[10px] uppercase font-bold mb-1">Total</p>
+                    <p className="font-bold text-sm">₹{order.total_amount.toLocaleString('en-IN')}</p>
                   </div>
-                ))}
-              </div>
-              
-              <div className="grid grid-cols-3 gap-4 mb-6">
-                <div>
-                  <p className="text-zinc-500 text-[10px] uppercase font-bold mb-1">Total</p>
-                  <p className="font-bold text-sm">₹{order.total_amount.toLocaleString('en-IN')}</p>
+                  <div>
+                    <p className="text-zinc-500 text-[10px] uppercase font-bold mb-1">Paid</p>
+                    <p className="font-bold text-sm text-green-500">₹{order.paid_amount.toLocaleString('en-IN')}</p>
+                  </div>
+                  <div>
+                    <p className="text-zinc-500 text-[10px] uppercase font-bold mb-1 flex items-center gap-1">
+                      Balance
+                      {isOverdue && <span className="text-amber-400 font-normal lowercase">(&gt;7d)</span>}
+                    </p>
+                    <p className={`font-bold text-sm ${isOverdue ? 'text-amber-400 font-extrabold' : 'text-red-500'}`}>
+                      ₹{order.remaining_amount.toLocaleString('en-IN')}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-zinc-500 text-[10px] uppercase font-bold mb-1">Paid</p>
-                  <p className="font-bold text-sm text-green-500">₹{order.paid_amount.toLocaleString('en-IN')}</p>
-                </div>
-                <div>
-                  <p className="text-zinc-500 text-[10px] uppercase font-bold mb-1">Balance</p>
-                  <p className="font-bold text-sm text-red-500">₹{order.remaining_amount.toLocaleString('en-IN')}</p>
-                </div>
-              </div>
 
-              <div className="w-full bg-zinc-800 h-2 rounded-full mb-6 overflow-hidden">
-                <div 
-                  className="bg-green-500 h-full transition-all duration-500" 
-                  style={{ width: `${Math.min(100, (order.paid_amount / order.total_amount) * 100)}%` }}
-                />
-              </div>
+                <div className="w-full bg-zinc-800 h-2 rounded-full mb-6 overflow-hidden">
+                  <div 
+                    className="bg-green-500 h-full transition-all duration-500" 
+                    style={{ width: `${Math.min(100, (order.paid_amount / order.total_amount) * 100)}%` }}
+                  />
+                </div>
 
-              {order.status !== 'Completed' && (
-                <button 
-                  id={`make-payment-order-btn-${order.order_id}`}
-                  onClick={() => setSelectedOrder(order)}
-                  className="w-full bg-zinc-800 hover:bg-zinc-700 py-3 rounded-xl font-bold text-sm transition-all"
-                >
-                  Make Payment
-                </button>
-              )}
-            </motion.div>
-          ))}
+                <div className="flex items-center gap-2">
+                  <button
+                    id={`view-order-details-btn-${order.order_id}`}
+                    type="button"
+                    onClick={() => setViewingOrderDetails(order)}
+                    className="flex-1 py-3 px-3 rounded-xl font-bold text-xs sm:text-sm transition-all flex items-center justify-center gap-2 bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-700/60"
+                  >
+                    <History className="w-3.5 h-3.5 text-orange-400" />
+                    <span>View Details & History</span>
+                  </button>
+
+                  {order.status !== 'Completed' && (
+                    <button 
+                      id={`make-payment-order-btn-${order.order_id}`}
+                      onClick={() => setSelectedOrder(order)}
+                      className={`py-3 px-4 rounded-xl font-bold text-xs sm:text-sm transition-all flex items-center justify-center gap-1.5 shrink-0 ${
+                        isOverdue
+                          ? 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 shadow-sm'
+                          : 'bg-orange-500 hover:bg-orange-600 text-white shadow-sm shadow-orange-500/20'
+                      }`}
+                    >
+                      {isOverdue && <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
+                      <span>Make Payment</span>
+                      {isOverdue && <span className="text-xs text-amber-300 font-normal">({daysPending}d Overdue)</span>}
+                    </button>
+                  )}
+                </div>
+              </motion.div>
+            );
+          })}
         </AnimatePresence>
 
         {filteredOrders.length === 0 && (
@@ -3289,8 +3454,30 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
                   <button type="submit" className="flex-1 bg-green-600 hover:bg-green-500 py-4 rounded-2xl font-bold text-sm text-white shadow-lg shadow-green-600/20 transition-all">Confirm Payment</button>
                 </div>
               </form>
+
+              {/* Chronological Payment Records & Status History inside Payment Modal */}
+              <div className="mt-6 pt-6 border-t border-zinc-800">
+                <OrderHistorySection order={selectedOrder} />
+              </div>
             </motion.div>
           </div>
+        )}
+      </AnimatePresence>
+
+      {/* Order Details View & History Modal */}
+      <AnimatePresence>
+        {viewingOrderDetails && (
+          <OrderDetailsModal
+            order={viewingOrderDetails}
+            onClose={() => setViewingOrderDetails(null)}
+            onMakePayment={(order) => {
+              setSelectedOrder(order);
+            }}
+            onEditOrder={openEditOrderForm}
+            onPrintOrder={(order) => handlePrintOrders([order])}
+            isPrinting={isPrinting}
+            printingOrderId={printingOrderId}
+          />
         )}
       </AnimatePresence>
 
