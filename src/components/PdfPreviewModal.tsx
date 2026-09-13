@@ -17,6 +17,7 @@ import {
 import * as pdfjsLib from 'pdfjs-dist';
 // @ts-ignore
 import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.js?url';
+import { useBackHandler } from '../utils/backHandler';
 
 // Configure local worker bundled by Vite
 if (typeof window !== 'undefined' && pdfjsLib && pdfjsLib.GlobalWorkerOptions) {
@@ -85,6 +86,12 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
   useEffect(() => {
     isInitialFitDone.current = false;
   }, [previewData?.filename]);
+
+  // Handle Android back button & swipe gestures
+  useBackHandler(() => {
+    onClose();
+    return true;
+  }, !!previewData, 100);
 
   // Handle escape key
   useEffect(() => {

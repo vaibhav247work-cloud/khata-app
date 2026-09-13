@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef, useEffectEvent } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useEffectEvent, useCallback } from 'react';
 import { 
   LayoutDashboard, 
   ArrowUpRight, 
@@ -80,6 +80,7 @@ import { Capacitor } from '@capacitor/core';
 import { Directory, Filesystem } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { PdfPreviewModal, type PdfPreviewData } from './components/PdfPreviewModal';
+import { backHandler, useBackHandler } from './utils/backHandler';
 
 // --- Types & Constants ---
 
@@ -820,37 +821,77 @@ export default function App() {
     setLastSyncedAt('');
   };
 
-  // --- Back Button Logic ---
-  useEffect(() => {
-    // Push initial state
-    window.history.pushState({ tab: activeTab }, '');
+  const [tabHistory, setTabHistory] = useState<Tab[]>(['Dashboard']);
+  const tabHistoryRef = useRef<Tab[]>(['Dashboard']);
+  tabHistoryRef.current = tabHistory;
 
-    const handleBack = (event: PopStateEvent) => {
-      if (activeTab !== 'Dashboard') {
-        setActiveTab('Dashboard');
-        window.history.pushState({ tab: 'Dashboard' }, '');
-      } else {
-        if (exitConfirmRef.current) {
-          // Allow exit - don't push state
-          // The browser will go back to whatever was before this app
-          return;
-        }
+  const activeTabRef = useRef<Tab>('Dashboard');
+  activeTabRef.current = activeTab;
 
-        setExitConfirm(true);
-        exitConfirmRef.current = true;
-        setTimeout(() => {
-          setExitConfirm(false);
-          exitConfirmRef.current = false;
-        }, 3000);
-        
-        // Push state again to prevent exit on first back press
-        window.history.pushState({ tab: 'Dashboard' }, '');
+  const navigateToTab = useCallback((newTab: Tab) => {
+    setActiveTab(newTab);
+    setTabHistory(prev => {
+      // If navigating directly to Home, reset tab history stack to root
+      if (newTab === 'Dashboard') {
+        return ['Dashboard'];
       }
-    };
+      if (prev[prev.length - 1] === newTab) {
+        return prev;
+      }
+      return [...prev, newTab];
+    });
+  }, []);
 
-    window.addEventListener('popstate', handleBack);
-    return () => window.removeEventListener('popstate', handleBack);
-  }, [activeTab]);
+  // --- Android Hardware Back Button & Back Gestures Logic ---
+  const handleFallbackBack = useCallback(() => {
+    const history = tabHistoryRef.current;
+    const currentTab = activeTabRef.current;
+
+    // 1. If tab history has previous tabs, navigate to the last accessed tab
+    if (history.length > 1) {
+      const nextHistory = [...history];
+      nextHistory.pop(); // Remove current tab
+      const previousTab = nextHistory[nextHistory.length - 1];
+      setTabHistory(nextHistory);
+      setActiveTab(previousTab);
+      return;
+    }
+
+    // 2. If currently not on Dashboard, return to Dashboard
+    if (currentTab !== 'Dashboard') {
+      setTabHistory(['Dashboard']);
+      setActiveTab('Dashboard');
+      return;
+    }
+
+    // 3. User is on Dashboard with empty tab history: double-back to exit
+    if (exitConfirmRef.current) {
+      backHandler.exitApp();
+      return;
+    }
+
+    exitConfirmRef.current = true;
+    setExitConfirm(true);
+    setTimeout(() => {
+      exitConfirmRef.current = false;
+      setExitConfirm(false);
+    }, 2500);
+  }, []);
+
+  // Initialize native Capacitor & browser back handler singleton
+  useEffect(() => {
+    backHandler.init(handleFallbackBack);
+  }, [handleFallbackBack]);
+
+  useEffect(() => {
+    backHandler.setFallback(handleFallbackBack);
+  }, [handleFallbackBack]);
+
+  // Back handler for full-screen PDF preview modal
+  useBackHandler(() => {
+    setPdfPreviewData(null);
+    return true;
+  }, !!pdfPreviewData, 100);
 
   // --- Auth ---
   const handleLogin = (e: React.FormEvent<HTMLFormElement>) => {
@@ -1158,7 +1199,7 @@ export default function App() {
             <Dashboard 
               stats={stats} 
               transactions={transactions} 
-              onNavigateToTransactions={() => setActiveTab('Transactions')}
+              onNavigateToTransactions={() => navigateToTab('Transactions')}
             />
           )}
           {activeTab === 'Transactions' && (
@@ -1255,12 +1296,12 @@ export default function App() {
       {/* Bottom Navigation */}
       <nav className="fixed bottom-0 left-0 right-0 bg-zinc-900/95 backdrop-blur-xl border-t border-zinc-800 px-2 pb-6 pt-3 z-50 pb-safe overflow-x-auto no-scrollbar">
         <div className="min-w-max sm:min-w-0 max-w-4xl mx-auto flex justify-around items-center gap-1 px-2">
-          <NavItem icon={LayoutDashboard} label="Home" active={activeTab === 'Dashboard'} onClick={() => setActiveTab('Dashboard')} />
-          <NavItem icon={ArrowUpRight} label="Txs" active={activeTab === 'Transactions'} onClick={() => setActiveTab('Transactions')} />
-          <NavItem icon={Package} label="Orders" active={activeTab === 'Orders'} onClick={() => setActiveTab('Orders')} />
-          <NavItem icon={History} label="Passbook" active={activeTab === 'Passbook'} onClick={() => setActiveTab('Passbook')} />
-          <NavItem icon={FileText} label="Reports" active={activeTab === 'Reports'} onClick={() => setActiveTab('Reports')} />
-          <NavItem icon={Settings} label="Admin" active={activeTab === 'Admin'} onClick={() => setActiveTab('Admin')} />
+          <NavItem icon={LayoutDashboard} label="Home" active={activeTab === 'Dashboard'} onClick={() => navigateToTab('Dashboard')} />
+          <NavItem icon={ArrowUpRight} label="Txs" active={activeTab === 'Transactions'} onClick={() => navigateToTab('Transactions')} />
+          <NavItem icon={Package} label="Orders" active={activeTab === 'Orders'} onClick={() => navigateToTab('Orders')} />
+          <NavItem icon={History} label="Passbook" active={activeTab === 'Passbook'} onClick={() => navigateToTab('Passbook')} />
+          <NavItem icon={FileText} label="Reports" active={activeTab === 'Reports'} onClick={() => navigateToTab('Reports')} />
+          <NavItem icon={Settings} label="Admin" active={activeTab === 'Admin'} onClick={() => navigateToTab('Admin')} />
         </div>
       </nav>
 
@@ -1601,6 +1642,23 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
     setShowAdd(false);
     setEditingTransaction(null);
   };
+
+  // Back button & gesture handlers for Transactions
+  useBackHandler(() => {
+    if (isDeleting) return true;
+    setShowBulkDeleteConfirm(false);
+    return true;
+  }, showBulkDeleteConfirm, 60);
+
+  useBackHandler(() => {
+    closeTransactionForm();
+    return true;
+  }, showAdd || !!editingTransaction, 50);
+
+  useBackHandler(() => {
+    setSelectedIds(new Set());
+    return true;
+  }, selectedIds.size > 0, 40);
 
   const handleTransactionSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -2440,6 +2498,33 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
     setEditingOrder(null);
     setNewItems([createEmptyOrderItem()]);
   };
+
+  // Back button & gesture handlers for Orders
+  useBackHandler(() => {
+    setOrderToDelete(null);
+    return true;
+  }, !!orderToDelete, 70);
+
+  useBackHandler(() => {
+    if (isSettling) return true;
+    setShowSettleModal(false);
+    return true;
+  }, showSettleModal, 60);
+
+  useBackHandler(() => {
+    closeOrderForm();
+    return true;
+  }, showAdd || !!editingOrder, 55);
+
+  useBackHandler(() => {
+    setSelectedOrder(null);
+    return true;
+  }, !!selectedOrder, 50);
+
+  useBackHandler(() => {
+    setSelectedOrderIds(new Set());
+    return true;
+  }, selectedOrderIds.size > 0, 40);
 
   const openAddOrderForm = () => {
     setEditingOrder(null);
@@ -4086,6 +4171,18 @@ function AdminModule({ apiLink, setApiLink, transactions, orders, showToast, isA
   const [showGoogleResetConfirm, setShowGoogleResetConfirm] = useState(false);
   const [isResettingGoogleSheet, setIsResettingGoogleSheet] = useState(false);
   const [syncButtonLabel, setSyncButtonLabel] = useState('Sync Data');
+
+  // Back button & gesture handlers for Admin
+  useBackHandler(() => {
+    setShowClearConfirm(false);
+    return true;
+  }, showClearConfirm, 50);
+
+  useBackHandler(() => {
+    if (isResettingGoogleSheet) return true;
+    setShowGoogleResetConfirm(false);
+    return true;
+  }, showGoogleResetConfirm, 50);
 
   const handleSaveApi = () => {
     localStorage.setItem('BT_API_LINK', apiLink);
