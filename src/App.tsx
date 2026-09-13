@@ -259,8 +259,18 @@ const saveOrShareReport = async (
   // 2. Web / Mobile Browser
   // First, ALWAYS download the file directly to the device Downloads folder
   let blob: Blob;
-  if (rawArrayBuffer) {
-    blob = new Blob([rawArrayBuffer], { type: mimeType });
+  if (rawArrayBuffer && rawArrayBuffer.byteLength > 0) {
+    try {
+      blob = new Blob([rawArrayBuffer.slice(0)], { type: mimeType });
+    } catch {
+      const byteCharacters = atob(cleanBase64);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      blob = new Blob([byteArray], { type: mimeType });
+    }
   } else {
     const byteCharacters = atob(cleanBase64);
     const byteNumbers = new Array(byteCharacters.length);
@@ -585,7 +595,6 @@ const generateAndShareOrderReceipts = async (
     );
 
     if (!isHandled) {
-      const pdfBlob = new Blob([pdfArrayBuffer], { type: 'application/pdf' });
       downloadBlobFallback(pdfBlob, filename);
     }
 
@@ -773,7 +782,6 @@ const generateAndSharePassbookPDF = async (
     );
 
     if (!isHandled) {
-      const pdfBlob = new Blob([pdfArrayBuffer], { type: 'application/pdf' });
       downloadBlobFallback(pdfBlob, filename);
     }
 
@@ -4355,7 +4363,6 @@ function ReportsModule({ transactions, orders, showToast, onPreviewPdf }: any) {
       );
 
       if (!isHandledNatively) {
-        const pdfBlob = new Blob([pdfArrayBuffer], { type: 'application/pdf' });
         downloadBlobFallback(pdfBlob, filename);
       }
 

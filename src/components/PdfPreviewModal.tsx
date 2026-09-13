@@ -60,9 +60,11 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
   const [numPages, setNumPages] = useState<number>(0);
   const [scale, setScale] = useState<number>(1.0);
   const [basePageWidth, setBasePageWidth] = useState<number>(595.28);
+  const [pdfDoc, setPdfDoc] = useState<any>(null);
   
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRefs = useRef<Map<number, HTMLCanvasElement>>(new Map());
+  const activeRenderTasksRef = useRef<Map<number, any>>(new Map());
   const isInitialFitDone = useRef<boolean>(false);
 
   // Touch pinch-to-zoom & double-tap handling
@@ -168,66 +170,122 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
     lastTapRef.current = now;
   };
 
-  // Render PDF pages onto HTML5 Canvases
+  // Load PDF Document safely without detaching buffers
   useEffect(() => {
     if (!previewData || viewMode !== 'canvas') return;
 
     let isCancelled = false;
     setIsLoadingPdf(true);
     setRenderError(null);
+    setPdfDoc(null);
+    setNumPages(0);
 
-    const renderDocument = async () => {
+    const loadDocument = async () => {
       try {
-        let arrayBuffer = previewData.rawArrayBuffer;
-        if (!arrayBuffer && previewData.blob) {
-          arrayBuffer = await previewData.blob.arrayBuffer();
-        }
+        // Safe helper to obtain a completely independent byte buffer
+        // Decoding base64 or slicing ArrayBuffer prevents PDF.js Web Worker from detaching the original buffer
+        const getFreshBytes = async (): Promise<Uint8Array> => {
+          if (previewData.base64Data) {
+            const clean = previewData.base64Data.replace(/^data:application\/pdf;base64,/, '');
+            const binary = atob(clean);
+            const len = binary.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+              bytes[i] = binary.charCodeAt(i);
+            }
+            return bytes;
+          }
 
-        if (!arrayBuffer) {
+          if (previewData.rawArrayBuffer && previewData.rawArrayBuffer.byteLength > 0) {
+            return new Uint8Array(previewData.rawArrayBuffer.slice(0));
+          }
+
+          if (previewData.blob) {
+            const ab = await previewData.blob.arrayBuffer();
+            return new Uint8Array(ab.slice(0));
+          }
+
           throw new Error('No PDF data available');
-        }
+        };
 
-        let pdfDoc: any;
+        let doc: any = null;
         try {
+          const bytes = await getFreshBytes();
           const loadingTask = pdfjsLib.getDocument({
-            data: new Uint8Array(arrayBuffer),
+            data: bytes,
             cMapUrl: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/cmaps/',
             cMapPacked: true,
           });
-          pdfDoc = await loadingTask.promise;
+          doc = await loadingTask.promise;
         } catch (workerErr) {
-          console.warn('Primary worker failed, trying main-thread fallback:', workerErr);
+          console.warn('Primary worker load failed, trying main-thread fallback:', workerErr);
           if (pdfjsLib.GlobalWorkerOptions) {
             pdfjsLib.GlobalWorkerOptions.workerSrc = '';
           }
-          const loadingTask = pdfjsLib.getDocument({
-            data: new Uint8Array(arrayBuffer),
+          const fallbackBytes = await getFreshBytes();
+          const fallbackTask = pdfjsLib.getDocument({
+            data: fallbackBytes,
           });
-          pdfDoc = await loadingTask.promise;
+          doc = await fallbackTask.promise;
         }
 
         if (isCancelled) return;
 
-        setNumPages(pdfDoc.numPages);
+        setPdfDoc(doc);
+        setNumPages(doc.numPages);
 
         // Fetch page 1 dimensions to calibrate screen fit
-        const firstPage = await pdfDoc.getPage(1);
+        const firstPage = await doc.getPage(1);
         const unscaledViewport = firstPage.getViewport({ scale: 1.0 });
         const nativeWidth = unscaledViewport.width || 595.28;
         setBasePageWidth(nativeWidth);
 
-        // On first open, auto-fit to full width so it fills the screen perfectly without shrinking
+        // On first open, auto-fit to full width so it fills the screen perfectly
         if (!isInitialFitDone.current) {
           isInitialFitDone.current = true;
           const initialFit = calculateFitWidthScale(nativeWidth);
-          if (Math.abs(initialFit - scale) > 0.05) {
-            setScale(initialFit);
-            return;
-          }
+          setScale(initialFit);
         }
+      } catch (err: any) {
+        console.error('PDF.js document load error:', err);
+        if (!isCancelled) {
+          setRenderError(err?.message || 'Failed to load PDF document');
+          setIsLoadingPdf(false);
+          setViewMode('frame');
+        }
+      }
+    };
+
+    loadDocument();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [previewData, viewMode, calculateFitWidthScale]);
+
+  // Render PDF pages onto HTML5 Canvases whenever doc or scale changes
+  useEffect(() => {
+    if (!pdfDoc || viewMode !== 'canvas' || numPages <= 0) return;
+
+    let isCancelled = false;
+
+    // Cancel any in-flight page render tasks before re-rendering (prevents canvas collisions on zoom)
+    activeRenderTasksRef.current.forEach((task) => {
+      try {
+        task.cancel();
+      } catch {}
+    });
+    activeRenderTasksRef.current.clear();
+
+    const renderPages = async () => {
+      try {
+        setIsLoadingPdf(true);
+        // Small delay to ensure all canvas elements have mounted in the DOM
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        if (isCancelled) return;
 
         // Render each page sequentially at high crispness
-        for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+        for (let pageNum = 1; pageNum <= numPages; pageNum++) {
           if (isCancelled) break;
           const page = await pdfDoc.getPage(pageNum);
           if (isCancelled) break;
@@ -247,11 +305,24 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
           const ctx = canvas.getContext('2d');
           if (ctx) {
             ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-            await page.render({
+            const renderTask = page.render({
               canvasContext: ctx,
               viewport,
               canvas,
-            }).promise;
+            });
+
+            activeRenderTasksRef.current.set(pageNum, renderTask);
+
+            try {
+              await renderTask.promise;
+            } catch (renderErr: any) {
+              if (renderErr?.name === 'RenderingCancelledException') {
+                return;
+              }
+              throw renderErr;
+            } finally {
+              activeRenderTasksRef.current.delete(pageNum);
+            }
           }
         }
 
@@ -259,6 +330,7 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
           setIsLoadingPdf(false);
         }
       } catch (err: any) {
+        if (err?.name === 'RenderingCancelledException') return;
         console.error('PDF.js canvas render error:', err);
         if (!isCancelled) {
           setRenderError(err?.message || 'Failed to render PDF preview');
@@ -268,12 +340,18 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
       }
     };
 
-    renderDocument();
+    renderPages();
 
     return () => {
       isCancelled = true;
+      activeRenderTasksRef.current.forEach((task) => {
+        try {
+          task.cancel();
+        } catch {}
+      });
+      activeRenderTasksRef.current.clear();
     };
-  }, [previewData, viewMode, scale, calculateFitWidthScale]);
+  }, [pdfDoc, numPages, scale, viewMode]);
 
   if (!previewData) return null;
 
@@ -285,7 +363,9 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
         previewData.base64Data,
         previewData.filename,
         'application/pdf',
-        previewData.rawArrayBuffer
+        previewData.rawArrayBuffer && previewData.rawArrayBuffer.byteLength > 0
+          ? previewData.rawArrayBuffer.slice(0)
+          : undefined
       );
       if (handled && showToast) {
         showToast('Document opened for Print / Share!', 'success');
