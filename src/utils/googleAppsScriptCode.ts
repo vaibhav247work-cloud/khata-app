@@ -1,19 +1,20 @@
-/**
+export const GOOGLE_APPS_SCRIPT_CODE = `/**
  * Google Apps Script for KhataBook Pro / BuildTrack Pro
  *
  * Setup:
- * 1. Open a Google Sheet.
+ * 1. Open your Google Sheet.
  * 2. Go to Extensions > Apps Script.
- * 3. Paste this code and save.
- * 4. Deploy > New deployment > Web app.
- * 5. Set "Execute as" to "Me".
- * 6. Set "Who has access" to "Anyone".
- * 7. Copy the Web App URL and paste it into the app Admin settings.
+ * 3. Replace any existing code with this script and click Save (disk icon).
+ * 4. Deploy > Manage deployments > Edit > New version > Deploy
+ *    (or Deploy > New deployment > Web app with "Execute as: Me" and "Who has access: Anyone").
+ * 5. Copy the Web App URL and paste it into the app Admin settings.
  *
- * Notes:
- * - This script auto-creates the required sheets if missing.
- * - If a required sheet already exists, it only ensures the header row exists.
- * - It does not create duplicate sheets.
+ * Sheets managed automatically:
+ * - Transactions (id, date, type, category, amount, payment_type, description, reference, order_id, synced)
+ * - Orders (order_id, items, supplier, total_amount, paid_amount, remaining_amount, status, date, synced)
+ * - OrderPayments (payment_id, order_id, amount, payment_type, date, synced)
+ * - Categories (name)
+ * - PaymentModes (name)
  */
 
 const SHEET_CONFIG = {
@@ -237,11 +238,10 @@ function deleteRowsByKey_(sheet, headers, keyHeader, keysToDelete) {
   values.forEach(function(row, index) {
     var key = String(row[keyIndex] || "").trim();
     if (key && deleteSet[key]) {
-      rowsToDelete.push(index + 2); // 1-indexed, header is row 1
+      rowsToDelete.push(index + 2);
     }
   });
 
-  // Delete rows from bottom to top so index shifts don't affect row numbers
   rowsToDelete.sort(function(a, b) { return b - a; }).forEach(function(rowNum) {
     sheet.deleteRow(rowNum);
   });
@@ -441,3 +441,4 @@ function doPost(e) {
     duplicatesRemoved: result.duplicatesRemoved,
   });
 }
+`;

@@ -33,7 +33,8 @@ import {
   Printer,
   Share2,
   ArrowUpDown,
-  CheckCheck
+  CheckCheck,
+  FileCode
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { db, type Transaction, type Order, type OrderPayment, type OrderItem } from './db';
@@ -83,13 +84,24 @@ import { Share } from '@capacitor/share';
 import { PdfPreviewModal, type PdfPreviewData } from './components/PdfPreviewModal';
 import { OrderHistorySection } from './components/OrderHistorySection';
 import { OrderDetailsModal } from './components/OrderDetailsModal';
+import { ExpenseCategoriesManager } from './components/ExpenseCategoriesManager';
+import { PaymentModesManager } from './components/PaymentModesManager';
+import { GoogleAppsScriptModal } from './components/GoogleAppsScriptModal';
+import {
+  getStoredExpenseCategories,
+  saveStoredExpenseCategories,
+  getStoredPaymentModes,
+  saveStoredPaymentModes,
+  DEFAULT_EXPENSE_CATEGORIES,
+  DEFAULT_PAYMENT_MODES
+} from './utils/categoriesAndModes';
 import { backHandler, useBackHandler } from './utils/backHandler';
 
 // --- Types & Constants ---
 
 type Tab = 'Dashboard' | 'Transactions' | 'Orders' | 'Passbook' | 'Reports' | 'Admin';
 
-const PAYMENT_TYPES = ['Cash', 'UPI', 'Bank Transfer', 'Card', 'Online'] as const;
+const PAYMENT_TYPES = DEFAULT_PAYMENT_MODES;
 
 const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8'];
 const SYNC_PENDING_KEY = 'BT_PENDING_SYNC';
@@ -824,6 +836,34 @@ export default function App() {
     setLastSyncedAt('');
   };
 
+  const [expenseCategories, setExpenseCategories] = useState<string[]>(getStoredExpenseCategories);
+  const [paymentModes, setPaymentModes] = useState<string[]>(getStoredPaymentModes);
+
+  const handleUpdateCategories = (newCats: string[]) => {
+    setExpenseCategories(newCats);
+    saveStoredExpenseCategories(newCats);
+  };
+
+  const handleUpdatePaymentModes = (newModes: string[]) => {
+    setPaymentModes(newModes);
+    saveStoredPaymentModes(newModes);
+  };
+
+  useEffect(() => {
+    const handleCatUpdate = (e: any) => {
+      if (e.detail && Array.isArray(e.detail)) setExpenseCategories(e.detail);
+    };
+    const handleModeUpdate = (e: any) => {
+      if (e.detail && Array.isArray(e.detail)) setPaymentModes(e.detail);
+    };
+    window.addEventListener('bt_categories_updated', handleCatUpdate);
+    window.addEventListener('bt_payment_modes_updated', handleModeUpdate);
+    return () => {
+      window.removeEventListener('bt_categories_updated', handleCatUpdate);
+      window.removeEventListener('bt_payment_modes_updated', handleModeUpdate);
+    };
+  }, []);
+
   const [tabHistory, setTabHistory] = useState<Tab[]>(['Dashboard']);
   const tabHistoryRef = useRef<Tab[]>(['Dashboard']);
   tabHistoryRef.current = tabHistory;
@@ -924,6 +964,8 @@ export default function App() {
     
     setTransactions(sortedTxs);
     setOrders(sortedOrds);
+    setExpenseCategories(getStoredExpenseCategories());
+    setPaymentModes(getStoredPaymentModes());
     setHasPendingSync(localHasUnsyncedChanges || localStorage.getItem(SYNC_PENDING_KEY) === 'true');
   };
 
@@ -1214,6 +1256,8 @@ export default function App() {
               markSyncPending={markSyncPending}
               showToast={showToast}
               isAdmin={isAdmin}
+              expenseCategories={expenseCategories}
+              paymentModes={paymentModes}
             />
           )}
           {activeTab === 'Orders' && (
@@ -1224,6 +1268,7 @@ export default function App() {
               isAdmin={isAdmin} 
               markSyncPending={markSyncPending} 
               onPreviewPdf={setPdfPreviewData}
+              paymentModes={paymentModes}
             />
           )}
           {activeTab === 'Passbook' && (
@@ -1258,6 +1303,12 @@ export default function App() {
               onGoogleSheetReset={handleGoogleSheetReset}
               isSyncing={isSyncing}
               onSync={() => syncWithGoogleSheets('manual')}
+              expenseCategories={expenseCategories}
+              onUpdateCategories={handleUpdateCategories}
+              paymentModes={paymentModes}
+              onUpdatePaymentModes={handleUpdatePaymentModes}
+              markSyncPending={markSyncPending}
+              onRefreshData={() => loadData()}
             />
           )}
         </AnimatePresence>
@@ -1434,7 +1485,16 @@ function StatCard({ label, value, icon: Icon, color, bg, full, isCount }: any) {
   );
 }
 
-function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, markSyncPending, showToast }: any) {
+function TransactionsModule({ 
+  transactions, 
+  onAdd, 
+  searchQuery, 
+  setSearchQuery, 
+  markSyncPending, 
+  showToast,
+  expenseCategories = DEFAULT_EXPENSE_CATEGORIES,
+  paymentModes = DEFAULT_PAYMENT_MODES
+}: any) {
   const [showAdd, setShowAdd] = useState(false);
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -1445,7 +1505,37 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
   const [periodFilter, setPeriodFilter] = useState<'All' | 'Today' | 'This Week' | 'This Month' | 'Last Month' | 'Last 30 Days' | 'This Year' | 'Custom'>('All');
   const [typeFilter, setTypeFilter] = useState<'All' | 'Credit' | 'Debit'>('All');
   const [paymentModeFilter, setPaymentModeFilter] = useState<string>('All');
+  const [categoryFilter, setCategoryFilter] = useState<string>('All');
   const [customRange, setCustomRange] = useState({ start: '', end: '' });
+
+  // Add / Edit form category states
+  const [selectedCategory, setSelectedCategory] = useState<string>(() => expenseCategories[0] || 'Material');
+  const [isCustomCategory, setIsCustomCategory] = useState(false);
+  const [customCategoryInput, setCustomCategoryInput] = useState('');
+
+  // Keep selected category aligned when opening add or edit modal
+  useEffect(() => {
+    if (editingTransaction) {
+      const existing = editingTransaction.category || '';
+      if (expenseCategories.includes(existing)) {
+        setSelectedCategory(existing);
+        setIsCustomCategory(false);
+        setCustomCategoryInput('');
+      } else if (existing) {
+        setSelectedCategory(existing);
+        setIsCustomCategory(false);
+        setCustomCategoryInput('');
+      } else {
+        setSelectedCategory(expenseCategories[0] || 'Material');
+        setIsCustomCategory(false);
+        setCustomCategoryInput('');
+      }
+    } else if (showAdd) {
+      setSelectedCategory(expenseCategories[0] || 'Material');
+      setIsCustomCategory(false);
+      setCustomCategoryInput('');
+    }
+  }, [editingTransaction, showAdd, expenseCategories]);
 
   // Progressive Lazy Loading State (Virtual Pagination)
   const PAGE_SIZE = 30;
@@ -1455,7 +1545,7 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
   // Reset pagination limit when any filter or query changes
   useEffect(() => {
     setDisplayLimit(PAGE_SIZE);
-  }, [searchQuery, periodFilter, typeFilter, paymentModeFilter, customRange]);
+  }, [searchQuery, periodFilter, typeFilter, paymentModeFilter, categoryFilter, customRange]);
 
   // Filter transactions
   const filteredTransactions = useMemo(() => {
@@ -1477,6 +1567,9 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
 
       // Payment Mode match
       if (paymentModeFilter !== 'All' && tx.payment_type !== paymentModeFilter) return false;
+
+      // Category match
+      if (categoryFilter !== 'All' && tx.category !== categoryFilter) return false;
 
       // Period match
       if (periodFilter === 'All') return true;
@@ -1644,6 +1737,8 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
   const closeTransactionForm = () => {
     setShowAdd(false);
     setEditingTransaction(null);
+    setIsCustomCategory(false);
+    setCustomCategoryInput('');
   };
 
   // Back button & gesture handlers for Transactions
@@ -1836,8 +1931,23 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
               className="bg-zinc-800 border border-zinc-700 text-zinc-300 text-[11px] rounded-lg px-2 py-1 focus:outline-none"
             >
               <option value="All">All Modes</option>
-              {PAYMENT_TYPES.map((p) => (
+              {paymentModes.map((p: string) => (
                 <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Category Selector */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] uppercase font-bold text-zinc-500">Category:</span>
+            <select
+              value={categoryFilter}
+              onChange={(e) => setCategoryFilter(e.target.value)}
+              className="bg-zinc-800 border border-zinc-700 text-zinc-300 text-[11px] rounded-lg px-2 py-1 focus:outline-none max-w-[130px] truncate"
+            >
+              <option value="All">All Categories</option>
+              {expenseCategories.map((c: string) => (
+                <option key={c} value={c}>{c}</option>
               ))}
             </select>
           </div>
@@ -2173,14 +2283,88 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-zinc-500 uppercase mb-2">Name / Category</label>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-xs font-bold text-zinc-500 uppercase">Category / Name</label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsCustomCategory(!isCustomCategory);
+                        if (!isCustomCategory) {
+                          setCustomCategoryInput(selectedCategory && selectedCategory !== '__custom__' ? selectedCategory : '');
+                        }
+                      }}
+                      className="text-[11px] font-bold text-orange-400 hover:text-orange-300 transition-colors"
+                    >
+                      {isCustomCategory ? '← Choose from List' : '+ Type Custom'}
+                    </button>
+                  </div>
+
+                  {!isCustomCategory ? (
+                    <div className="space-y-2">
+                      <select 
+                        value={selectedCategory}
+                        onChange={(e) => {
+                          if (e.target.value === '__custom__') {
+                            setIsCustomCategory(true);
+                            setCustomCategoryInput('');
+                          } else {
+                            setSelectedCategory(e.target.value);
+                          }
+                        }}
+                        className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-orange-500"
+                        required
+                      >
+                        {expenseCategories.map((cat: string) => (
+                          <option key={cat} value={cat}>{cat}</option>
+                        ))}
+                        {editingTransaction?.category && !expenseCategories.includes(editingTransaction.category) && (
+                          <option value={editingTransaction.category}>{editingTransaction.category} (Existing)</option>
+                        )}
+                        <option value="__custom__">+ Other / Type Custom Category...</option>
+                      </select>
+
+                      {/* Quick chip selection for top categories */}
+                      {expenseCategories.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 pt-0.5">
+                          {expenseCategories.slice(0, 6).map((cat: string) => (
+                            <button
+                              key={cat}
+                              type="button"
+                              onClick={() => setSelectedCategory(cat)}
+                              className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition-all ${
+                                selectedCategory === cat
+                                  ? 'bg-orange-500 text-white shadow-sm'
+                                  : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-750'
+                              }`}
+                            >
+                              {cat}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5">
+                      <input 
+                        type="text" 
+                        value={customCategoryInput}
+                        onChange={(e) => setCustomCategoryInput(e.target.value)}
+                        placeholder="Enter custom category name (e.g. Plumbing, Electrical)..." 
+                        className="w-full bg-zinc-800 border border-orange-500/60 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:ring-1 focus:ring-orange-500" 
+                        required={isCustomCategory}
+                        autoFocus
+                      />
+                      <p className="text-[11px] text-zinc-500">
+                        Tip: You can manage permanent categories and payment modes anytime in the Admin tab.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Hidden input ensuring the resolved category is always submitted in FormData */}
                   <input 
+                    type="hidden" 
                     name="category" 
-                    type="text" 
-                    defaultValue={editingTransaction?.category || ''}
-                    placeholder="e.g. Cement, Site Payment" 
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm text-white" 
-                    required 
+                    value={isCustomCategory ? customCategoryInput.trim() : selectedCategory} 
                   />
                 </div>
 
@@ -2199,8 +2383,15 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
                   </div>
                   <div>
                     <label className="block text-xs font-bold text-zinc-500 uppercase mb-2">Payment Mode</label>
-                    <select name="payment_type" defaultValue={editingTransaction?.payment_type || PAYMENT_TYPES[0]} className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm text-white">
-                      {PAYMENT_TYPES.map(p => <option key={p} value={p}>{p}</option>)}
+                    <select 
+                      name="payment_type" 
+                      defaultValue={editingTransaction?.payment_type || paymentModes[0] || 'Cash'} 
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-orange-500"
+                    >
+                      {paymentModes.map((p: string) => <option key={p} value={p}>{p}</option>)}
+                      {editingTransaction?.payment_type && !paymentModes.includes(editingTransaction.payment_type) && (
+                        <option value={editingTransaction.payment_type}>{editingTransaction.payment_type} (Existing)</option>
+                      )}
                     </select>
                   </div>
                 </div>
@@ -2237,7 +2428,7 @@ function TransactionsModule({ transactions, onAdd, searchQuery, setSearchQuery, 
   );
 }
 
-function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, onPreviewPdf }: any) {
+function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, onPreviewPdf, paymentModes = DEFAULT_PAYMENT_MODES }: any) {
   const [showAdd, setShowAdd] = useState(false);
   const [editingOrder, setEditingOrder] = useState<Order | null>(null);
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
@@ -2255,7 +2446,7 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
   const [printingOrderId, setPrintingOrderId] = useState<string | null>(null);
   const [isBulkCompleting, setIsBulkCompleting] = useState(false);
   const [showSettleModal, setShowSettleModal] = useState(false);
-  const [settlePaymentType, setSettlePaymentType] = useState('Cash');
+  const [settlePaymentType, setSettlePaymentType] = useState(() => paymentModes[0] || 'Cash');
   const [settleDate, setSettleDate] = useState(() => format(new Date(), 'yyyy-MM-dd'));
   const [isSettling, setIsSettling] = useState(false);
 
@@ -3441,7 +3632,7 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
                   <div>
                     <label className="block text-xs font-bold text-zinc-500 uppercase mb-2">Payment Mode</label>
                     <select name="payment_type" className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-orange-500">
-                      {PAYMENT_TYPES.map(p => <option key={p} value={p}>{p}</option>)}
+                      {paymentModes.map((p: string) => <option key={p} value={p}>{p}</option>)}
                     </select>
                   </div>
                   <div>
@@ -3594,7 +3785,7 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
                       onChange={(e) => setSettlePaymentType(e.target.value)}
                       className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-orange-500"
                     >
-                      {PAYMENT_TYPES.map(p => <option key={p} value={p}>{p}</option>)}
+                      {paymentModes.map((p: string) => <option key={p} value={p}>{p}</option>)}
                     </select>
                   </div>
                   <div>
@@ -4353,9 +4544,28 @@ function ReportsModule({ transactions, orders, showToast, onPreviewPdf }: any) {
   );
 }
 
-function AdminModule({ apiLink, setApiLink, transactions, orders, showToast, isAdmin, setIsAdmin, resetSyncState, onGoogleSheetReset, isSyncing, onSync }: any) {
+function AdminModule({ 
+  apiLink, 
+  setApiLink, 
+  transactions, 
+  orders, 
+  showToast, 
+  isAdmin, 
+  setIsAdmin, 
+  resetSyncState, 
+  onGoogleSheetReset, 
+  isSyncing, 
+  onSync,
+  expenseCategories = DEFAULT_EXPENSE_CATEGORIES,
+  onUpdateCategories,
+  paymentModes = DEFAULT_PAYMENT_MODES,
+  onUpdatePaymentModes,
+  markSyncPending,
+  onRefreshData
+}: any) {
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [showGoogleResetConfirm, setShowGoogleResetConfirm] = useState(false);
+  const [showAppsScriptModal, setShowAppsScriptModal] = useState(false);
   const [isResettingGoogleSheet, setIsResettingGoogleSheet] = useState(false);
   const [syncButtonLabel, setSyncButtonLabel] = useState('Sync Data');
 
@@ -4489,6 +4699,13 @@ function AdminModule({ apiLink, setApiLink, transactions, orders, showToast, isA
             >
               {isSyncing ? 'Syncing...' : syncButtonLabel}
             </button>
+            <button
+              onClick={() => setShowAppsScriptModal(true)}
+              className="w-full bg-zinc-800/80 hover:bg-zinc-700/80 border border-zinc-700/60 text-zinc-200 px-6 py-3.5 rounded-2xl font-bold text-xs sm:text-sm flex items-center justify-center gap-2.5 transition-all active:scale-98 shadow-sm"
+            >
+              <FileCode className="w-4 h-4 text-orange-400" />
+              View & Copy Google Apps Script Code
+            </button>
             <div className="ml-2 text-[10px] text-zinc-600 flex items-center gap-1.5">
               <div className="w-1 h-1 bg-zinc-600 rounded-full" />
               This link connects your app to Google Sheets for cloud backup and reconnect auto-sync.
@@ -4571,6 +4788,26 @@ function AdminModule({ apiLink, setApiLink, transactions, orders, showToast, isA
         </div>
       </div>
 
+      {/* Expense Categories Manager */}
+      <ExpenseCategoriesManager
+        categories={expenseCategories}
+        onUpdateCategories={onUpdateCategories}
+        transactions={transactions}
+        showToast={showToast}
+        markSyncPending={markSyncPending}
+        onRefreshData={onRefreshData}
+      />
+
+      {/* Payment Modes Manager */}
+      <PaymentModesManager
+        paymentModes={paymentModes}
+        onUpdatePaymentModes={onUpdatePaymentModes}
+        transactions={transactions}
+        showToast={showToast}
+        markSyncPending={markSyncPending}
+        onRefreshData={onRefreshData}
+      />
+
       {/* Clear Confirmation Modal */}
       <AnimatePresence>
         {showClearConfirm && (
@@ -4644,13 +4881,22 @@ function AdminModule({ apiLink, setApiLink, transactions, orders, showToast, isA
       <div className="bg-orange-500/10 border border-orange-500/20 rounded-[32px] p-8">
         <h4 className="font-bold text-orange-500 mb-2 flex items-center gap-2"><AlertCircle className="w-5 h-5" /> Admin Notice</h4>
         <p className="text-zinc-400 text-sm leading-relaxed">
-          Ensure your Google Sheet has the correct headers: <br/>
+          Ensure your Google Sheet has the correct headers (auto-created by the Apps Script): <br/>
           <strong>Transactions:</strong> id, date, type, category, amount, payment_type, description, reference, order_id, synced <br/>
           <strong>Orders:</strong> order_id, items (JSON), supplier, total_amount, paid_amount, remaining_amount, status, date, synced <br/>
           <strong>OrderPayments:</strong> payment_id, order_id, amount, payment_type, date, synced <br/>
+          <strong>Categories:</strong> name (Custom expense categories auto-synced across devices) <br/>
+          <strong>PaymentModes:</strong> name (Custom payment modes auto-synced across devices) <br/>
           Pending offline changes now sync automatically when the device reconnects. Reset Google Sheet Data clears cloud rows only and keeps the sheet headers.
         </p>
       </div>
+
+      {/* Google Apps Script Modal */}
+      <GoogleAppsScriptModal
+        isOpen={showAppsScriptModal}
+        onClose={() => setShowAppsScriptModal(false)}
+        showToast={showToast}
+      />
     </motion.div>
   );
 }

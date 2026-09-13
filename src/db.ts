@@ -6,7 +6,7 @@ export interface Transaction {
   type: 'Credit' | 'Debit';
   category: string;
   amount: number;
-  payment_type: 'Cash' | 'UPI' | 'Bank Transfer' | 'Card' | 'Online';
+  payment_type: string;
   description: string;
   reference?: string;
   order_id?: string;

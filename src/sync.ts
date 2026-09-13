@@ -1,9 +1,21 @@
 import { db, type Order, type OrderPayment, type Transaction, type DeletedRecord } from './db';
+import {
+  getStoredExpenseCategories,
+  saveStoredExpenseCategories,
+  getStoredPaymentModes,
+  saveStoredPaymentModes,
+  isCategoriesSyncPending,
+  clearCategoriesSyncPending,
+  isPaymentModesSyncPending,
+  clearPaymentModesSyncPending,
+} from './utils/categoriesAndModes';
 
 const SHEET_NAMES = {
   transactions: 'Transactions',
   orders: 'Orders',
   payments: 'OrderPayments',
+  categories: 'Categories',
+  paymentModes: 'PaymentModes',
 } as const;
 
 type SheetRow = Record<string, string | number | boolean>;
@@ -140,7 +152,14 @@ export const hasUnsyncedLocalChanges = async () => {
     db.deletedRecords.count(),
   ]);
 
-  return transactionCount + orderCount + paymentCount + deletedCount > 0;
+  const categoriesPending = isCategoriesSyncPending();
+  const paymentModesPending = isPaymentModesSyncPending();
+
+  return (
+    transactionCount + orderCount + paymentCount + deletedCount > 0 ||
+    categoriesPending ||
+    paymentModesPending
+  );
 };
 
 export const pushDeletedRecordsToGoogleSheets = async (apiLink: string) => {
@@ -297,10 +316,114 @@ export const reconcileOrdersWithTransactions = async () => {
   }
 };
 
+export const pushListToSheet = async (apiLink: string, sheet: string, items: string[]) => {
+  const data = items.map((name) => ({ name }));
+  try {
+    // Try replaceList dedicated action first (cleanest for ordered lists)
+    await requestJson(apiLink, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8',
+      },
+      body: JSON.stringify({
+        action: 'replaceList',
+        sheet,
+        data,
+      }),
+    });
+  } catch (err: any) {
+    const errorMsg = String(err?.message || '').toLowerCase();
+    if (errorMsg.includes('invalid action')) {
+      // Fallback to standard sync action for older Apps Script versions
+      await syncSheet(apiLink, sheet, data);
+    } else {
+      throw err;
+    }
+  }
+};
+
+export const syncCategoriesWithGoogleSheets = async (apiLink: string) => {
+  try {
+    const isPending = isCategoriesSyncPending();
+    let sheetRows: SheetRow[] = [];
+    try {
+      sheetRows = await getSheetRows(apiLink, SHEET_NAMES.categories);
+    } catch (pullErr: any) {
+      const msg = String(pullErr?.message || '').toLowerCase();
+      if (msg.includes('invalid sheet') || msg.includes('not found')) {
+        console.warn('Categories sheet not configured in Google Sheet yet.');
+        return;
+      }
+      throw pullErr;
+    }
+
+    const sheetCategories = sheetRows
+      .map((r) => asString(r.name).trim())
+      .filter((name) => name.length > 0);
+
+    const localCategories = getStoredExpenseCategories();
+
+    if (isPending || sheetCategories.length === 0) {
+      // Local changes exist or cloud sheet is empty: push local to Google Sheet
+      await pushListToSheet(apiLink, SHEET_NAMES.categories, localCategories);
+      clearCategoriesSyncPending();
+    } else {
+      // Adopt cloud categories if they differ from local
+      if (JSON.stringify(sheetCategories) !== JSON.stringify(localCategories)) {
+        saveStoredExpenseCategories(sheetCategories, false);
+      }
+      clearCategoriesSyncPending();
+    }
+  } catch (err) {
+    console.warn('Categories sync skipped or failed:', err);
+  }
+};
+
+export const syncPaymentModesWithGoogleSheets = async (apiLink: string) => {
+  try {
+    const isPending = isPaymentModesSyncPending();
+    let sheetRows: SheetRow[] = [];
+    try {
+      sheetRows = await getSheetRows(apiLink, SHEET_NAMES.paymentModes);
+    } catch (pullErr: any) {
+      const msg = String(pullErr?.message || '').toLowerCase();
+      if (msg.includes('invalid sheet') || msg.includes('not found')) {
+        console.warn('PaymentModes sheet not configured in Google Sheet yet.');
+        return;
+      }
+      throw pullErr;
+    }
+
+    const sheetModes = sheetRows
+      .map((r) => asString(r.name).trim())
+      .filter((name) => name.length > 0);
+
+    const localModes = getStoredPaymentModes();
+
+    if (isPending || sheetModes.length === 0) {
+      // Local changes exist or cloud sheet is empty: push local to Google Sheet
+      await pushListToSheet(apiLink, SHEET_NAMES.paymentModes, localModes);
+      clearPaymentModesSyncPending();
+    } else {
+      // Adopt cloud modes if they differ from local
+      if (JSON.stringify(sheetModes) !== JSON.stringify(localModes)) {
+        saveStoredPaymentModes(sheetModes, false);
+      }
+      clearPaymentModesSyncPending();
+    }
+  } catch (err) {
+    console.warn('PaymentModes sync skipped or failed:', err);
+  }
+};
+
 export const syncLocalAndGoogleSheets = async (apiLink: string) => {
   await pushLocalDataToGoogleSheets(apiLink);
   await pullOnlineDataIntoLocalDb(apiLink);
   await markAllLocalDataSynced();
+
+  // Sync custom Expense Categories and Payment Modes with Google Sheets
+  await syncCategoriesWithGoogleSheets(apiLink);
+  await syncPaymentModesWithGoogleSheets(apiLink);
 };
 
 export const markAllLocalDataSynced = async () => {
@@ -315,6 +438,8 @@ export const markAllLocalDataSynced = async () => {
       payment.synced = true;
     }),
   ]);
+  clearCategoriesSyncPending();
+  clearPaymentModesSyncPending();
 };
 
 export const deleteTransactionsWithRecalculation = async (idsToDelete: string[]) => {
