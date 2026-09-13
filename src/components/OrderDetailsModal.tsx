@@ -12,7 +12,8 @@ import {
   CreditCard,
   RefreshCw,
   ExternalLink,
-  ChevronRight
+  ChevronRight,
+  Trash2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format, parseISO, startOfDay, differenceInCalendarDays } from 'date-fns';
@@ -26,6 +27,10 @@ interface OrderDetailsModalProps {
   onMakePayment: (order: Order) => void;
   onEditOrder: (order: Order) => void;
   onPrintOrder: (order: Order) => void;
+  onDeleteOrder?: (order: Order) => void;
+  isAdmin?: boolean;
+  onPaymentDeleted?: () => void;
+  showToast?: (message: string, type?: 'success' | 'error' | 'info') => void;
   isPrinting?: boolean;
   printingOrderId?: string | null;
 }
@@ -36,6 +41,10 @@ export const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   onMakePayment,
   onEditOrder,
   onPrintOrder,
+  onDeleteOrder,
+  isAdmin = false,
+  onPaymentDeleted,
+  showToast,
   isPrinting = false,
   printingOrderId = null,
 }) => {
@@ -116,13 +125,13 @@ export const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
           </div>
 
           {/* Top Quick Actions */}
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
             <button
               id={`details-print-btn-${order.order_id}`}
               type="button"
               onClick={() => onPrintOrder(order)}
               disabled={isPrinting}
-              className="p-2.5 rounded-2xl bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 hover:text-orange-400 border border-zinc-700/60 transition-colors disabled:opacity-50"
+              className="p-2 sm:p-2.5 rounded-xl sm:rounded-2xl bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 hover:text-orange-400 border border-zinc-700/60 transition-colors disabled:opacity-50"
               title="Print / Share Receipt"
             >
               {isPrinting && printingOrderId === order.order_id ? (
@@ -138,19 +147,32 @@ export const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                 onClose();
                 onEditOrder(order);
               }}
-              className="p-2.5 rounded-2xl bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 hover:text-orange-400 border border-zinc-700/60 transition-colors"
+              className="p-2 sm:p-2.5 rounded-xl sm:rounded-2xl bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 hover:text-orange-400 border border-zinc-700/60 transition-colors"
               title="Edit Order"
             >
               <Pencil className="w-4 h-4" />
             </button>
+            {onDeleteOrder && (
+              <button
+                id={`details-delete-btn-${order.order_id}`}
+                type="button"
+                onClick={() => {
+                  onDeleteOrder(order);
+                }}
+                className="p-2 sm:p-2.5 rounded-xl sm:rounded-2xl bg-zinc-800/80 hover:bg-red-500/20 text-zinc-400 hover:text-red-400 border border-zinc-700/60 transition-colors"
+                title={isAdmin ? "Delete Order (Admin)" : ((order.paid_amount || 0) > 0 ? "Only Admin can delete orders with payments" : "Delete Order")}
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            )}
             <button
               id="details-close-btn"
               type="button"
               onClick={onClose}
-              className="p-2.5 rounded-2xl bg-zinc-800/80 hover:bg-zinc-800 text-zinc-400 hover:text-white border border-zinc-700/60 transition-colors ml-1"
+              className="p-2 sm:p-2.5 rounded-xl sm:rounded-2xl bg-zinc-800/80 hover:bg-zinc-800 text-zinc-400 hover:text-white border border-zinc-700/60 transition-colors"
               title="Close Details"
             >
-              <X className="w-5 h-5" />
+              <X className="w-4 h-4 sm:w-5 sm:h-5" />
             </button>
           </div>
         </div>
@@ -237,6 +259,9 @@ export const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
           <OrderHistorySection 
             order={order} 
             onMakePayment={order.status !== 'Completed' ? () => onMakePayment(order) : undefined}
+            isAdmin={isAdmin}
+            onPaymentDeleted={onPaymentDeleted}
+            showToast={showToast}
           />
         </div>
 

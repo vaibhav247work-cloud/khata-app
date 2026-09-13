@@ -485,6 +485,82 @@ export const deleteTransactionsWithRecalculation = async (idsToDelete: string[])
   await reconcileOrdersWithTransactions();
 };
 
+export const deleteOrderPaymentWithRecalculation = async (orderId: string, paymentId: string) => {
+  // 1. Fetch the payment record if it exists in db.orderPayments
+  let payment = await db.orderPayments.get(paymentId);
+  if (!payment) {
+    const matches = await db.orderPayments.where('order_id').equals(orderId).toArray();
+    payment = matches.find((p) => p.payment_id === paymentId);
+  }
+
+  // 2. Track deletion of OrderPayment and delete from db
+  if (paymentId && !paymentId.startsWith('recorded-')) {
+    await trackDeletedRecords('OrderPayments', [paymentId]);
+    await db.orderPayments.delete(paymentId);
+  }
+
+  // 3. Find and track associated transaction(s) for this order/payment
+  const txs = await db.transactions.where('order_id').equals(orderId).toArray();
+  const txsToDelete: string[] = [];
+
+  for (const tx of txs) {
+    if (tx.type !== 'Debit') continue;
+    if (tx.id === paymentId) {
+      txsToDelete.push(tx.id);
+    } else if (payment && Math.abs(Number(tx.amount) - Number(payment.amount)) < 0.01) {
+      txsToDelete.push(tx.id);
+      break; // delete one matching transaction per payment
+    }
+  }
+
+  // If no transactions found with order_id, check by category and description
+  if (txsToDelete.length === 0 && payment) {
+    const order = await db.orders.get(orderId);
+    if (order) {
+      const itemSummary = Array.isArray(order.items) ? order.items.map((i) => i.material).join(', ') : '';
+      const txsBySupplier = await db.transactions
+        .where('category')
+        .equals(order.supplier)
+        .and((t) => t.type === 'Debit' && Math.abs(Number(t.amount) - Number(payment.amount)) < 0.01)
+        .toArray();
+      if (txsBySupplier.length > 0) {
+        txsToDelete.push(txsBySupplier[0].id);
+      }
+    }
+  }
+
+  if (txsToDelete.length > 0) {
+    await trackDeletedRecords('Transactions', txsToDelete);
+    await db.transactions.bulkDelete(txsToDelete);
+  }
+
+  // 4. Recalculate order paid_amount and remaining_amount from remaining payments
+  const order = await db.orders.get(orderId);
+  if (order) {
+    const remainingPayments = await db.orderPayments.where('order_id').equals(orderId).toArray();
+    let newPaid = remainingPayments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+    
+    // If it was a legacy recorded payment and no remaining records, newPaid is 0
+    if (paymentId.startsWith('recorded-') && remainingPayments.length === 0) {
+      newPaid = 0;
+    }
+
+    const totalAmount = Number(order.total_amount) || 0;
+    const newRemaining = Math.max(0, totalAmount - newPaid);
+    const newStatus: Order['status'] = newPaid <= 0 ? 'Pending' : (newRemaining <= 0 ? 'Completed' : 'Partial');
+
+    await db.orders.update(orderId, {
+      paid_amount: newPaid,
+      remaining_amount: newRemaining,
+      status: newStatus,
+      synced: false,
+    });
+  }
+
+  // 5. Run global reconciliation to ensure consistency across the app
+  await reconcileOrdersWithTransactions();
+};
+
 export const deleteOrderWithAssociated = async (order: Order) => {
   // 1. Find and track all payments for this order
   const payments = await db.orderPayments.where('order_id').equals(order.order_id).toArray();

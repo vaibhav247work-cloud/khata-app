@@ -883,6 +883,8 @@ export default function App() {
   const activeTabRef = useRef<Tab>('Dashboard');
   activeTabRef.current = activeTab;
 
+  const [orderInitialFilter, setOrderInitialFilter] = useState<'All' | 'Pending' | 'Partial' | 'Completed' | 'Overdue'>('All');
+
   const navigateToTab = useCallback((newTab: Tab) => {
     setActiveTab(newTab);
     setTabHistory(prev => {
@@ -896,6 +898,16 @@ export default function App() {
       return [...prev, newTab];
     });
   }, []);
+
+  const handleNavigateToPendingOrders = useCallback(() => {
+    setOrderInitialFilter('Pending');
+    navigateToTab('Orders');
+  }, [navigateToTab]);
+
+  const handleNavigateToOrders = useCallback(() => {
+    setOrderInitialFilter('All');
+    navigateToTab('Orders');
+  }, [navigateToTab]);
 
   // --- Android Hardware Back Button & Back Gestures Logic ---
   const handleFallbackBack = useCallback(() => {
@@ -1304,6 +1316,8 @@ export default function App() {
               stats={stats} 
               transactions={transactions} 
               onNavigateToTransactions={() => navigateToTab('Transactions')}
+              onNavigateToPendingOrders={handleNavigateToPendingOrders}
+              onNavigateToOrders={handleNavigateToOrders}
             />
           )}
           {activeTab === 'Transactions' && (
@@ -1328,6 +1342,7 @@ export default function App() {
               markSyncPending={markSyncPending} 
               onPreviewPdf={setPdfPreviewData}
               paymentModes={paymentModes}
+              initialStatusFilter={orderInitialFilter}
             />
           )}
           {activeTab === 'Passbook' && (
@@ -1492,6 +1507,9 @@ export default function App() {
                       whileHover={{ x: 5 }}
                       whileTap={{ scale: 0.98 }}
                       onClick={() => {
+                        if (item.id === 'Orders') {
+                          setOrderInitialFilter('All');
+                        }
                         navigateToTab(item.id as Tab);
                         setIsSidebarOpen(false);
                       }}
@@ -1570,11 +1588,15 @@ export default function App() {
 function Dashboard({ 
   stats, 
   transactions, 
-  onNavigateToTransactions 
+  onNavigateToTransactions,
+  onNavigateToPendingOrders,
+  onNavigateToOrders,
 }: { 
   stats: any; 
   transactions: Transaction[]; 
   onNavigateToTransactions?: () => void;
+  onNavigateToPendingOrders?: () => void;
+  onNavigateToOrders?: () => void;
 }) {
   const recentTxs = useMemo(() => {
     return [...transactions].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
@@ -1591,8 +1613,27 @@ function Dashboard({
         <StatCard label="Net Balance" value={stats.netBalance} icon={Wallet} color="text-white" bg="bg-zinc-900" full />
         <StatCard label="Total Credit" value={stats.totalCredit} icon={ArrowUpRight} color="text-green-500" bg="bg-zinc-900" />
         <StatCard label="Total Debit" value={stats.totalDebit} icon={ArrowDownLeft} color="text-red-500" bg="bg-zinc-900" />
-        <StatCard label="Pending Payments" value={stats.pendingPayments} icon={Clock} color="text-orange-500" bg="bg-zinc-900" />
-        <StatCard label="Active Orders" value={stats.pendingOrders} icon={Package} color="text-blue-500" bg="bg-zinc-900" isCount />
+        <StatCard 
+          id="stat-card-pending-payments"
+          label="Pending Payments" 
+          value={stats.pendingPayments} 
+          icon={Clock} 
+          color="text-orange-500" 
+          bg="bg-zinc-900" 
+          onClick={onNavigateToPendingOrders}
+          title="View Pending Payment Orders"
+        />
+        <StatCard 
+          id="stat-card-active-orders"
+          label="Active Orders" 
+          value={stats.pendingOrders} 
+          icon={Package} 
+          color="text-blue-500" 
+          bg="bg-zinc-900" 
+          isCount 
+          onClick={onNavigateToOrders}
+          title="View Orders"
+        />
       </div>
 
       <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6">
@@ -1648,14 +1689,21 @@ function Dashboard({
   );
 }
 
-function StatCard({ label, value, icon: Icon, color, bg, full, isCount }: any) {
+function StatCard({ id, label, value, icon: Icon, color, bg, full, isCount, onClick, title }: any) {
   return (
-    <div className={`${bg} border border-zinc-800 rounded-3xl p-5 ${full ? 'col-span-2' : ''}`}>
+    <div 
+      id={id}
+      onClick={onClick}
+      title={title}
+      className={`${bg} border border-zinc-800 rounded-3xl p-5 ${full ? 'col-span-2' : ''} ${
+        onClick ? 'cursor-pointer group hover:border-zinc-700/80 hover:bg-zinc-850/50 transition-all select-none active:scale-[0.99]' : ''
+      }`}
+    >
       <div className="flex items-center gap-3 mb-3">
-        <div className={`p-2 rounded-xl bg-zinc-800 ${color}`}>
+        <div className={`p-2 rounded-xl bg-zinc-800 ${color} shrink-0`}>
           <Icon className="w-5 h-5" />
         </div>
-        <span className="text-zinc-500 text-xs font-medium uppercase tracking-wider">{label}</span>
+        <span className="text-zinc-500 text-xs font-medium uppercase tracking-wider truncate">{label}</span>
       </div>
       <p className={`text-2xl font-bold ${color}`}>
         {!isCount && '₹'}{value.toLocaleString()}
@@ -2607,14 +2655,29 @@ function TransactionsModule({
   );
 }
 
-function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, onPreviewPdf, paymentModes = DEFAULT_PAYMENT_MODES }: any) {
+function OrdersModule({ 
+  orders, 
+  onUpdate, 
+  showToast, 
+  isAdmin, 
+  markSyncPending, 
+  onPreviewPdf, 
+  paymentModes = DEFAULT_PAYMENT_MODES,
+  initialStatusFilter = 'All'
+}: any) {
   const [showAdd, setShowAdd] = useState(false);
   const [editingOrder, setEditingOrder] = useState<Order | null>(null);
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [viewingOrderDetails, setViewingOrderDetails] = useState<Order | null>(null);
   const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
   const [orderSearchQuery, setOrderSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'All' | 'Pending' | 'Partial' | 'Completed' | 'Overdue'>('All');
+  const [statusFilter, setStatusFilter] = useState<'All' | 'Pending' | 'Partial' | 'Completed' | 'Overdue'>(initialStatusFilter);
+
+  useEffect(() => {
+    if (initialStatusFilter) {
+      setStatusFilter(initialStatusFilter);
+    }
+  }, [initialStatusFilter]);
   const [sortAsc, setSortAsc] = useState(false); // false = newest date first, true = oldest date first
   const createEmptyOrderItem = (): OrderItem => ({ id: crypto.randomUUID(), material: '', quantity: '', amount: 0 });
   const [newItems, setNewItems] = useState<OrderItem[]>([createEmptyOrderItem()]);
@@ -3081,13 +3144,31 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
     onUpdate();
   };
 
+  const handlePaymentDeleted = async () => {
+    markSyncPending();
+    onUpdate();
+    if (viewingOrderDetails) {
+      const refreshed = await db.orders.get(viewingOrderDetails.order_id);
+      if (refreshed) {
+        setViewingOrderDetails(refreshed);
+      }
+    }
+    if (selectedOrder) {
+      const refreshed = await db.orders.get(selectedOrder.order_id);
+      if (refreshed) {
+        setSelectedOrder(refreshed);
+      }
+    }
+  };
+
   const handleDeleteOrder = async (order: Order) => {
     try {
       // Check if payments exist
       const payments = await db.orderPayments.where('order_id').equals(order.order_id).toArray();
+      const hasPayments = payments.length > 0 || (order.paid_amount || 0) > 0;
       
       // If payments exist and not admin, block deletion
-      if (payments.length > 0 && !isAdmin) {
+      if (hasPayments && !isAdmin) {
         showToast('Only Admin can delete orders with payments', 'error');
         setOrderToDelete(null);
         return;
@@ -3096,8 +3177,11 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
       await deleteOrderWithAssociated(order);
       
       setOrderToDelete(null);
+      if (viewingOrderDetails?.order_id === order.order_id) {
+        setViewingOrderDetails(null);
+      }
       markSyncPending();
-      showToast('Order and associated transactions deleted', 'success');
+      showToast('Order and associated payments deleted', 'success');
       onUpdate();
     } catch (error) {
       console.error('Delete error:', error);
@@ -3408,7 +3492,7 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
                 animate={{ opacity: 1, y: 0, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.95, transition: { duration: 0.15 } }}
                 transition={{ duration: 0.2 }}
-                className={`bg-zinc-900 border rounded-3xl p-6 relative group transition-all ${
+                className={`bg-zinc-900 border rounded-3xl p-4 sm:p-6 relative group transition-all overflow-hidden min-w-0 ${
                   selectedOrderIds.has(order.order_id)
                     ? 'border-orange-500/60 shadow-lg shadow-orange-500/5'
                     : isOverdue
@@ -3417,9 +3501,9 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
                 }`}
               >
                 {/* Header Row: Checkbox, Supplier & Badges, Actions Toolbar */}
-                <div className="flex items-start justify-between gap-3 mb-4">
+                <div className="flex items-start justify-between gap-2 sm:gap-3 mb-3 sm:mb-4">
                   {/* Left: Checkbox + Supplier Info & Badges */}
-                  <div className="flex items-start gap-3 min-w-0 flex-1">
+                  <div className="flex items-start gap-2.5 sm:gap-3 min-w-0 flex-1">
                     <button
                       id={`select-order-checkbox-${order.order_id}`}
                       type="button"
@@ -3439,23 +3523,23 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
                       onClick={() => setViewingOrderDetails(order)}
                       title="Click to view Order Details & History"
                     >
-                      <div className="flex items-center gap-2 flex-wrap mb-1">
-                        <h3 className="text-lg font-bold truncate text-white hover:text-orange-400 transition-colors flex items-center gap-1.5">
-                          <span>{order.supplier}</span>
-                          <ChevronRight className="w-4 h-4 text-zinc-500 opacity-60 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all" />
+                      <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap mb-1">
+                        <h3 className="text-base sm:text-lg font-bold truncate text-white hover:text-orange-400 transition-colors flex items-center gap-1 max-w-full">
+                          <span className="truncate">{order.supplier}</span>
+                          <ChevronRight className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-zinc-500 opacity-60 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all shrink-0" />
                         </h3>
                         
-                        <div className="flex items-center gap-1.5 shrink-0">
+                        <div className="flex items-center gap-1 sm:gap-1.5 flex-wrap">
                           {isOverdue && (
                             <span 
-                              className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-amber-500/15 text-amber-400 border border-amber-500/30 shrink-0 shadow-sm"
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] sm:text-[10px] font-bold uppercase tracking-wider bg-amber-500/15 text-amber-400 border border-amber-500/30 shrink-0 shadow-sm"
                               title={`Order is ${order.status.toLowerCase()} for ${daysPending} days (>7 days limit)`}
                             >
                               <Clock className="w-3 h-3 text-amber-400 shrink-0" />
                               <span>{daysPending}d Overdue</span>
                             </span>
                           )}
-                          <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider shrink-0 ${
+                          <span className={`px-2 py-0.5 rounded-full text-[9px] sm:text-[10px] font-bold uppercase tracking-wider shrink-0 ${
                             order.status === 'Completed' ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 
                             order.status === 'Partial' ? 'bg-orange-500/10 text-orange-400 border border-orange-500/20' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
                           }`}>
@@ -3464,15 +3548,15 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2 text-xs text-zinc-500">
-                        <span className="truncate">{getItemSummary(order.items || [])}</span>
+                      <div className="flex items-center gap-1.5 text-xs text-zinc-500 flex-wrap">
+                        <span className="truncate max-w-[130px] sm:max-w-none">{getItemSummary(order.items || [])}</span>
                         <span>•</span>
                         <span className="shrink-0">{format(parseISO(order.date), 'dd MMM yyyy')}</span>
                         {isOverdue && (
                           <>
                             <span>•</span>
                             <span className="text-amber-400/90 font-medium shrink-0">
-                              {daysPending} days ago
+                              {daysPending}d ago
                             </span>
                           </>
                         )}
@@ -3481,12 +3565,12 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
                   </div>
 
                   {/* Right: Quick Action Buttons */}
-                  <div className="flex items-center gap-1 shrink-0 -mt-1 -mr-2">
+                  <div className="flex items-center gap-0.5 sm:gap-1 shrink-0">
                     <button
                       id={`view-order-history-btn-${order.order_id}`}
                       type="button"
                       onClick={() => setViewingOrderDetails(order)}
-                      className="p-2 rounded-xl transition-all text-zinc-400 hover:text-orange-400 hover:bg-orange-500/10"
+                      className="p-1.5 sm:p-2 rounded-lg sm:rounded-xl transition-all text-zinc-400 hover:text-orange-400 hover:bg-orange-500/10"
                       title="Order Details & History Log"
                     >
                       <History className="w-4 h-4" />
@@ -3496,7 +3580,7 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
                       type="button"
                       onClick={() => handlePrintOrders([order])}
                       disabled={isPrinting}
-                      className="p-2 rounded-xl transition-all text-zinc-400 hover:text-orange-400 hover:bg-orange-500/10 disabled:opacity-50"
+                      className="p-1.5 sm:p-2 rounded-lg sm:rounded-xl transition-all text-zinc-400 hover:text-orange-400 hover:bg-orange-500/10 disabled:opacity-50"
                       title="Print / Share Receipt"
                     >
                       {printingOrderId === order.order_id ? (
@@ -3509,7 +3593,7 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
                       id={`edit-order-btn-${order.order_id}`}
                       type="button"
                       onClick={() => openEditOrderForm(order)}
-                      className="p-2 rounded-xl transition-all text-zinc-400 hover:text-orange-400 hover:bg-orange-500/10"
+                      className="p-1.5 sm:p-2 rounded-lg sm:rounded-xl transition-all text-zinc-400 hover:text-orange-400 hover:bg-orange-500/10"
                       title="Edit Order"
                     >
                       <Pencil className="w-4 h-4" />
@@ -3518,12 +3602,8 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
                       id={`delete-order-btn-${order.order_id}`}
                       type="button"
                       onClick={() => setOrderToDelete(order)}
-                      className={`p-2 rounded-xl transition-all ${
-                        (order.paid_amount || 0) === 0 
-                          ? 'text-zinc-400 hover:text-red-500 hover:bg-red-500/10 opacity-100' 
-                          : 'text-zinc-600 hover:text-red-500 hover:bg-red-500/10 opacity-0 group-hover:opacity-100'
-                      }`}
-                      title="Delete Order"
+                      className="p-1.5 sm:p-2 rounded-lg sm:rounded-xl transition-all text-zinc-400 hover:text-red-500 hover:bg-red-500/10 cursor-pointer"
+                      title={isAdmin ? "Delete Order (Admin)" : ((order.paid_amount || 0) > 0 ? "Only Admin can delete orders with payments" : "Delete Order")}
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -3583,12 +3663,12 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
                   />
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                   <button
                     id={`view-order-details-btn-${order.order_id}`}
                     type="button"
                     onClick={() => setViewingOrderDetails(order)}
-                    className="flex-1 py-3 px-3 rounded-xl font-bold text-xs sm:text-sm transition-all flex items-center justify-center gap-2 bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-700/60"
+                    className="flex-1 py-2.5 sm:py-3 px-3 rounded-xl font-bold text-xs sm:text-sm transition-all flex items-center justify-center gap-2 bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-700/60"
                   >
                     <History className="w-3.5 h-3.5 text-orange-400" />
                     <span>View Details & History</span>
@@ -3598,7 +3678,7 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
                     <button 
                       id={`make-payment-order-btn-${order.order_id}`}
                       onClick={() => setSelectedOrder(order)}
-                      className={`py-3 px-4 rounded-xl font-bold text-xs sm:text-sm transition-all flex items-center justify-center gap-1.5 shrink-0 ${
+                      className={`py-2.5 sm:py-3 px-3 sm:px-4 rounded-xl font-bold text-xs sm:text-sm transition-all flex items-center justify-center gap-1.5 shrink-0 ${
                         isOverdue
                           ? 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 shadow-sm'
                           : 'bg-orange-500 hover:bg-orange-600 text-white shadow-sm shadow-orange-500/20'
@@ -3827,7 +3907,12 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
 
               {/* Chronological Payment Records & Status History inside Payment Modal */}
               <div className="mt-6 pt-6 border-t border-zinc-800">
-                <OrderHistorySection order={selectedOrder} />
+                <OrderHistorySection 
+                  order={selectedOrder} 
+                  isAdmin={isAdmin}
+                  onPaymentDeleted={handlePaymentDeleted}
+                  showToast={showToast}
+                />
               </div>
             </motion.div>
           </div>
@@ -3845,6 +3930,10 @@ function OrdersModule({ orders, onUpdate, showToast, isAdmin, markSyncPending, o
             }}
             onEditOrder={openEditOrderForm}
             onPrintOrder={(order) => handlePrintOrders([order])}
+            onDeleteOrder={(order) => setOrderToDelete(order)}
+            isAdmin={isAdmin}
+            onPaymentDeleted={handlePaymentDeleted}
+            showToast={showToast}
             isPrinting={isPrinting}
             printingOrderId={printingOrderId}
           />

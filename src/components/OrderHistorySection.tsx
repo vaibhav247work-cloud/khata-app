@@ -10,16 +10,22 @@ import {
   ArrowRight,
   TrendingUp,
   RefreshCw,
-  Plus
+  Plus,
+  Trash2,
+  AlertCircle
 } from 'lucide-react';
 import { format, parseISO, startOfDay, differenceInCalendarDays } from 'date-fns';
 import { db, type Order, type OrderPayment, type Transaction } from '../db';
+import { deleteOrderPaymentWithRecalculation } from '../sync';
 
 interface OrderHistorySectionProps {
   order: Order;
   onMakePayment?: () => void;
   className?: string;
   isInline?: boolean;
+  isAdmin?: boolean;
+  onPaymentDeleted?: () => void;
+  showToast?: (message: string, type?: 'success' | 'error' | 'info') => void;
 }
 
 export interface HistoryLogEvent {
@@ -43,10 +49,15 @@ export const OrderHistorySection: React.FC<OrderHistorySectionProps> = ({
   onMakePayment,
   className = '',
   isInline = false,
+  isAdmin = false,
+  onPaymentDeleted,
+  showToast,
 }) => {
   const [payments, setPayments] = useState<OrderPayment[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc'); // asc = chronological (oldest to newest)
+  const [paymentToDelete, setPaymentToDelete] = useState<HistoryLogEvent | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const fetchHistory = useCallback(async () => {
     setIsLoading(true);
@@ -219,6 +230,23 @@ export const OrderHistorySection: React.FC<OrderHistorySectionProps> = ({
 
   const isOverdue = (order.status === 'Pending' || order.status === 'Partial') && daysSinceCreation > 7;
 
+  const handleConfirmDeletePayment = async () => {
+    if (!paymentToDelete) return;
+    setIsDeleting(true);
+    try {
+      await deleteOrderPaymentWithRecalculation(order.order_id, paymentToDelete.id);
+      showToast?.(`Payment of ₹${(paymentToDelete.amount || 0).toLocaleString('en-IN')} deleted`, 'success');
+      setPaymentToDelete(null);
+      await fetchHistory();
+      onPaymentDeleted?.();
+    } catch (err) {
+      console.error('Failed to delete order payment:', err);
+      showToast?.('Failed to delete payment', 'error');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   return (
     <div className={`bg-zinc-950/70 border border-zinc-800/90 rounded-3xl p-4 sm:p-6 ${className}`}>
       {/* Section Header */}
@@ -326,26 +354,56 @@ export const OrderHistorySection: React.FC<OrderHistorySectionProps> = ({
                 </div>
 
                 {/* Event Card Content */}
-                <div className="bg-zinc-900/90 border border-zinc-800/80 rounded-2xl p-3.5 sm:p-4 hover:border-zinc-700/80 transition-all shadow-sm">
-                  {/* Top Bar: Event Title & Date */}
-                  <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1.5">
-                    <span className="text-xs sm:text-sm font-bold text-white flex items-center gap-2">
-                      {event.title}
+                <div className="bg-zinc-900/90 border border-zinc-800/80 rounded-2xl p-3 sm:p-4 hover:border-zinc-700/80 transition-all shadow-sm overflow-hidden min-w-0">
+                  {/* Top Bar: Event Title & Actions */}
+                  <div className="flex items-start justify-between gap-2 mb-1.5">
+                    <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                      <span className="text-xs sm:text-sm font-bold text-white">
+                        {event.title}
+                      </span>
                       {event.paymentType && (
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-zinc-800 text-orange-400 border border-zinc-700">
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-zinc-800 text-orange-400 border border-zinc-700 shrink-0">
                           {event.paymentType}
                         </span>
                       )}
-                    </span>
-                    <div className="flex items-center gap-1.5 text-[11px] text-zinc-500 shrink-0">
-                      <Clock className="w-3 h-3 text-zinc-500" />
-                      <span>{formatDate(event.date)}</span>
-                      {relativeTime && (
-                        <span className="px-1.5 py-0.2 rounded-md bg-zinc-800 text-zinc-400 text-[10px] font-semibold">
-                          {relativeTime}
-                        </span>
-                      )}
                     </div>
+
+                    {event.type === 'payment' && (
+                      <button
+                        id={`delete-payment-btn-${event.id}`}
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (!isAdmin) {
+                            showToast?.('Only Admin can delete order payments', 'error');
+                            return;
+                          }
+                          setPaymentToDelete(event);
+                        }}
+                        className={`p-1 sm:p-1.5 px-2 rounded-lg border transition-all flex items-center gap-1 text-[11px] font-semibold shrink-0 ${
+                          isAdmin
+                            ? 'bg-red-500/10 hover:bg-red-500/20 text-red-400 border-red-500/30 hover:border-red-500/50 cursor-pointer active:scale-95'
+                            : 'bg-zinc-900/40 text-zinc-600 border-zinc-800/40 cursor-not-allowed opacity-60'
+                        }`}
+                        title={isAdmin ? 'Delete this payment (Admin)' : 'Only Admin can delete payments'}
+                      >
+                        <Trash2 className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                        <span className="text-[10px]">Delete</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Sub-bar: Date & Relative Time */}
+                  <div className="flex items-center gap-2 text-[11px] text-zinc-500 mb-2 flex-wrap">
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <Clock className="w-3 h-3 text-zinc-500 shrink-0" />
+                      <span>{formatDate(event.date)}</span>
+                    </div>
+                    {relativeTime && (
+                      <span className="px-1.5 py-0.2 rounded-md bg-zinc-800 text-zinc-400 text-[10px] font-semibold shrink-0">
+                        {relativeTime}
+                      </span>
+                    )}
                   </div>
 
                   {/* Subtitle / Description */}
@@ -444,6 +502,65 @@ export const OrderHistorySection: React.FC<OrderHistorySectionProps> = ({
             <Plus className="w-3.5 h-3.5" />
             <span>Record Payment</span>
           </button>
+        </div>
+      )}
+      {/* Delete Payment Confirmation Modal */}
+      {paymentToDelete && (
+        <div 
+          className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm"
+          onClick={() => !isDeleting && setPaymentToDelete(null)}
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="bg-zinc-900 border border-zinc-800 p-6 sm:p-7 rounded-[32px] max-w-sm w-full text-center shadow-2xl"
+          >
+            <div className="w-14 h-14 bg-red-500/10 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4 border border-red-500/20">
+              <Trash2 className="w-7 h-7" />
+            </div>
+            <h3 className="text-lg font-bold text-white mb-1.5">Delete Order Payment?</h3>
+            <p className="text-zinc-400 text-xs mb-4 leading-relaxed">
+              Delete payment of <strong className="text-white">₹{(paymentToDelete.amount || 0).toLocaleString('en-IN')}</strong> ({paymentToDelete.paymentType || 'Payment'}) recorded on {formatDate(paymentToDelete.date)}?
+            </p>
+            <div className="bg-zinc-950/60 border border-zinc-800/80 rounded-2xl p-3 mb-5 text-left text-[11px] text-zinc-400 space-y-1">
+              <div className="flex justify-between">
+                <span>Deduct from Paid:</span>
+                <span className="font-bold text-red-400">-₹{(paymentToDelete.amount || 0).toLocaleString('en-IN')}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Restore to Balance:</span>
+                <span className="font-bold text-green-400">+₹{(paymentToDelete.amount || 0).toLocaleString('en-IN')}</span>
+              </div>
+              <div className="text-[10px] text-zinc-500 pt-1.5 border-t border-zinc-800">
+                Associated transaction ledger debit entry will also be deleted.
+              </div>
+            </div>
+            <div className="flex gap-2.5">
+              <button 
+                type="button"
+                disabled={isDeleting}
+                onClick={() => setPaymentToDelete(null)} 
+                className="flex-1 bg-zinc-800 hover:bg-zinc-700 py-3 rounded-2xl font-bold text-xs text-zinc-300 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button 
+                type="button"
+                id="confirm-delete-payment-btn"
+                disabled={isDeleting}
+                onClick={handleConfirmDeletePayment} 
+                className="flex-1 bg-red-500 hover:bg-red-600 py-3 rounded-2xl font-bold text-xs text-white transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5"
+              >
+                {isDeleting ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Deleting...</span>
+                  </>
+                ) : (
+                  <span>Delete Payment</span>
+                )}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
