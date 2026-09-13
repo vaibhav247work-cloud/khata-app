@@ -3808,16 +3808,16 @@ function ReportsModule({ transactions, orders, showToast, onPreviewPdf }: any) {
 
       // Quick summary boxes
       doc.setFillColor(240, 253, 244);
-      doc.roundedRect(10, 38, 88, 16, 3, 3, 'F');
+      doc.roundedRect(10, 39, 92, 17, 3, 3, 'F');
       doc.setFillColor(254, 242, 242);
-      doc.roundedRect(102, 38, 88, 16, 3, 3, 'F');
+      doc.roundedRect(108, 39, 92, 17, 3, 3, 'F');
       
       doc.setFont(activeFont);
-      doc.setFontSize(8);
+      doc.setFontSize(9.5);
       doc.setTextColor(22, 101, 52);
-      doc.text(`Total Credit:  ${cur}${creditTotal.toLocaleString('en-IN')}`, 16, 48);
+      doc.text(`Total Credit:  ${cur}${creditTotal.toLocaleString('en-IN')}`, 16, 50);
       doc.setTextColor(185, 28, 28);
-      doc.text(`Total Debit:  ${cur}${debitTotal.toLocaleString('en-IN')}`, 108, 48);
+      doc.text(`Total Debit:  ${cur}${debitTotal.toLocaleString('en-IN')}`, 114, 50);
 
       const tableData = (transactions || []).map((t: any) => [
         formatReportDate(t.date),
@@ -3831,15 +3831,15 @@ function ReportsModule({ transactions, orders, showToast, onPreviewPdf }: any) {
       autoTable(doc, {
         head: [['Date', 'Type', 'Category', 'Amount', 'Payment', 'Description']],
         body: tableData.length > 0 ? tableData : [['No records', '-', '-', '-', '-', '-']],
-        startY: 58,
+        startY: 61,
         theme: 'grid',
         styles: {
           font: activeFont,
-          fontSize: 7,
+          fontSize: 8,
           textColor: [39, 39, 42],
-          lineColor: [212, 212, 216],
+          lineColor: [220, 220, 224],
           lineWidth: 0.15,
-          cellPadding: 1.2,
+          cellPadding: 1.8,
         },
         headStyles: {
           font: activeFont,
@@ -3847,15 +3847,16 @@ function ReportsModule({ transactions, orders, showToast, onPreviewPdf }: any) {
           textColor: [255, 255, 255],
           lineColor: [194, 65, 12],
           lineWidth: 0.15,
-          fontStyle: 'normal',
+          fontSize: 8.5,
+          fontStyle: 'bold',
         },
         alternateRowStyles: { fillColor: [250, 250, 250] },
         columnStyles: {
-          0: { cellWidth: 31 },
-          1: { cellWidth: 18 },
+          0: { cellWidth: 32 },
+          1: { cellWidth: 17 },
           2: { cellWidth: 30 },
-          3: { cellWidth: 23, halign: 'right' },
-          4: { cellWidth: 27 },
+          3: { cellWidth: 24, halign: 'right' },
+          4: { cellWidth: 25 },
           5: { cellWidth: 'auto' },
         },
         didDrawPage: (data) => {

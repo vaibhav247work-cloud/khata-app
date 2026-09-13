@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { 
   X, 
   Printer, 
@@ -11,7 +11,8 @@ import {
   ZoomOut, 
   Maximize2, 
   Layers, 
-  AlertTriangle 
+  AlertTriangle,
+  MoveHorizontal
 } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist';
 // @ts-ignore
@@ -56,9 +57,17 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
   const [isLoadingPdf, setIsLoadingPdf] = useState(true);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [numPages, setNumPages] = useState<number>(0);
-  const [scale, setScale] = useState<number>(1.2);
+  const [scale, setScale] = useState<number>(1.0);
+  const [basePageWidth, setBasePageWidth] = useState<number>(595.28);
+  
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRefs = useRef<Map<number, HTMLCanvasElement>>(new Map());
+  const isInitialFitDone = useRef<boolean>(false);
+
+  // Touch pinch-to-zoom & double-tap handling
+  const touchStartDistRef = useRef<number | null>(null);
+  const touchStartScaleRef = useRef<number>(1.0);
+  const lastTapRef = useRef<number>(0);
 
   // Manage Blob URL lifecycle
   useEffect(() => {
@@ -72,6 +81,11 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
     }
   }, [previewData?.blob]);
 
+  // Reset initial fit state when document changes
+  useEffect(() => {
+    isInitialFitDone.current = false;
+  }, [previewData?.filename]);
+
   // Handle escape key
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -83,7 +97,71 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [previewData, onClose]);
 
-  // Render PDF pages onto HTML5 Canvases (completely immune to Chrome iframe blocking & sandboxing)
+  // Calculate optimal Fit-Width scale
+  const calculateFitWidthScale = useCallback((pageW: number = basePageWidth) => {
+    const containerW = containerRef.current ? containerRef.current.clientWidth : window.innerWidth;
+    // Minimal horizontal padding on mobile (12px) to maximize screen real estate and legibility
+    const padding = window.innerWidth < 640 ? 12 : 40;
+    const targetW = Math.max(containerW - padding, 280);
+    const calculated = Number((targetW / (pageW || 595.28)).toFixed(2));
+    return Math.min(Math.max(calculated, 0.45), 3.0);
+  }, [basePageWidth]);
+
+  const handleFitWidth = useCallback(() => {
+    const newScale = calculateFitWidthScale();
+    setScale(newScale);
+  }, [calculateFitWidthScale]);
+
+  const handleReadableZoom = useCallback(() => {
+    // 1.35x delivers crystal-clear, life-sized readability without shrinking
+    setScale(window.innerWidth < 640 ? 1.35 : 1.25);
+  }, []);
+
+  // Touch gesture listeners for fluid pinch-to-zoom
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length === 2) {
+      const dist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+      touchStartDistRef.current = dist;
+      touchStartScaleRef.current = scale;
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (e.touches.length === 2 && touchStartDistRef.current !== null) {
+      const dist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+      const factor = dist / touchStartDistRef.current;
+      const newScale = Math.min(Math.max(Number((touchStartScaleRef.current * factor).toFixed(2)), 0.5), 3.0);
+      setScale(newScale);
+    }
+  };
+
+  const handleTouchEnd = () => {
+    touchStartDistRef.current = null;
+  };
+
+  const handleDoubleTap = () => {
+    const now = Date.now();
+    if (now - lastTapRef.current < 300) {
+      // Toggle between Fit Width and 1.35x Readable zoom
+      const fitScale = calculateFitWidthScale();
+      setScale(current => {
+        if (Math.abs(current - fitScale) < 0.15) {
+          return 1.35; // Zoom in to large readable view
+        } else {
+          return fitScale; // Reset back to fit width
+        }
+      });
+    }
+    lastTapRef.current = now;
+  };
+
+  // Render PDF pages onto HTML5 Canvases
   useEffect(() => {
     if (!previewData || viewMode !== 'canvas') return;
 
@@ -125,7 +203,23 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
 
         setNumPages(pdfDoc.numPages);
 
-        // Render each page sequentially
+        // Fetch page 1 dimensions to calibrate screen fit
+        const firstPage = await pdfDoc.getPage(1);
+        const unscaledViewport = firstPage.getViewport({ scale: 1.0 });
+        const nativeWidth = unscaledViewport.width || 595.28;
+        setBasePageWidth(nativeWidth);
+
+        // On first open, auto-fit to full width so it fills the screen perfectly without shrinking
+        if (!isInitialFitDone.current) {
+          isInitialFitDone.current = true;
+          const initialFit = calculateFitWidthScale(nativeWidth);
+          if (Math.abs(initialFit - scale) > 0.05) {
+            setScale(initialFit);
+            return;
+          }
+        }
+
+        // Render each page sequentially at high crispness
         for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
           if (isCancelled) break;
           const page = await pdfDoc.getPage(pageNum);
@@ -134,7 +228,8 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
           const canvas = canvasRefs.current.get(pageNum);
           if (!canvas) continue;
 
-          const pixelRatio = window.devicePixelRatio || 1;
+          // Cap devicePixelRatio at 2.5 to save memory on ultra-dense mobile screens while remaining tack-sharp
+          const pixelRatio = Math.min(window.devicePixelRatio || 1, 2.5);
           const viewport = page.getViewport({ scale });
 
           canvas.width = Math.floor(viewport.width * pixelRatio);
@@ -161,7 +256,6 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
         if (!isCancelled) {
           setRenderError(err?.message || 'Failed to render PDF preview');
           setIsLoadingPdf(false);
-          // If canvas fails, switch to frame mode
           setViewMode('frame');
         }
       }
@@ -172,7 +266,7 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
     return () => {
       isCancelled = true;
     };
-  }, [previewData, viewMode, scale]);
+  }, [previewData, viewMode, scale, calculateFitWidthScale]);
 
   if (!previewData) return null;
 
@@ -186,7 +280,6 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
         'application/pdf',
         previewData.rawArrayBuffer
       );
-
       if (handled && showToast) {
         showToast('Document opened for Print / Share!', 'success');
       }
@@ -237,9 +330,9 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
       {/* Full-Screen Header Bar */}
       <header 
         id="pdf-preview-header"
-        className="bg-zinc-900 border-b border-zinc-800 px-3 sm:px-6 py-2.5 sm:py-3 flex items-center justify-between gap-2 shrink-0 shadow-lg"
+        className="bg-zinc-900 border-b border-zinc-800 px-2.5 sm:px-6 py-2.5 sm:py-3 flex items-center justify-between gap-2 shrink-0 shadow-lg"
       >
-        <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-orange-500/10 text-orange-500 flex items-center justify-center shrink-0 border border-orange-500/20">
             <FileText className="w-4 h-4 sm:w-5 sm:h-5" />
           </div>
@@ -248,12 +341,12 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
               {previewData.title || 'PDF Preview'}
             </h2>
             <div className="flex items-center gap-1.5 mt-0.5">
-              <span className="text-[10px] sm:text-xs text-zinc-400 font-mono truncate max-w-[140px] sm:max-w-xs">
+              <span className="text-[10px] sm:text-xs text-zinc-400 font-mono truncate max-w-[110px] sm:max-w-xs">
                 {previewData.filename}
               </span>
               {numPages > 0 && viewMode === 'canvas' && (
                 <span className="text-[10px] bg-zinc-800 text-zinc-400 px-1.5 py-0.2 rounded border border-zinc-700 shrink-0">
-                  {numPages} {numPages === 1 ? 'page' : 'pages'}
+                  {numPages} {numPages === 1 ? 'pg' : 'pgs'}
                 </span>
               )}
             </div>
@@ -262,72 +355,39 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
 
         {/* Action Controls */}
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          {/* Zoom controls for canvas view */}
-          {viewMode === 'canvas' && !isLoadingPdf && !renderError && (
-            <div className="hidden md:flex items-center bg-zinc-800 rounded-lg p-0.5 border border-zinc-700 text-zinc-300">
-              <button
-                type="button"
-                onClick={() => setScale(s => Math.max(0.7, s - 0.2))}
-                className="p-1.5 hover:text-white hover:bg-zinc-700 rounded transition-colors"
-                title="Zoom Out"
-              >
-                <ZoomOut className="w-3.5 h-3.5" />
-              </button>
-              <span className="text-[11px] font-mono px-2 text-zinc-400 select-none">
-                {Math.round(scale * 100)}%
-              </span>
-              <button
-                type="button"
-                onClick={() => setScale(s => Math.min(2.5, s + 0.2))}
-                className="p-1.5 hover:text-white hover:bg-zinc-700 rounded transition-colors"
-                title="Zoom In"
-              >
-                <ZoomIn className="w-3.5 h-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setScale(1.2)}
-                className="p-1.5 hover:text-white hover:bg-zinc-700 rounded transition-colors"
-                title="Reset Zoom"
-              >
-                <Maximize2 className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
+          {/* Download PDF Button */}
+          <button
+            id="pdf-preview-download-btn"
+            type="button"
+            onClick={handleDownload}
+            className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 active:scale-95 text-zinc-200 hover:text-white border border-zinc-700 transition-all"
+            title="Download PDF directly"
+          >
+            <Download className="w-3.5 h-3.5 text-orange-400" />
+            <span className="hidden sm:inline">Download</span>
+          </button>
 
           {/* Toggle View Mode (Canvas vs Native Object/Iframe) */}
           <button
             type="button"
             onClick={() => setViewMode(m => m === 'canvas' ? 'frame' : 'canvas')}
-            className="hidden sm:inline-flex items-center gap-1 text-xs font-medium px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition-colors"
+            className="hidden md:inline-flex items-center gap-1 text-xs font-medium px-2.5 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition-colors"
             title={viewMode === 'canvas' ? "Switch to Embedded Frame" : "Switch to Direct Canvas Viewer"}
           >
             <Layers className="w-3.5 h-3.5 text-zinc-400" />
             <span>{viewMode === 'canvas' ? 'Frame' : 'Canvas'}</span>
           </button>
 
-          {/* Open in New Tab (Bypasses all iframe security in Chrome) */}
+          {/* Open in New Tab */}
           <button
             id="pdf-preview-open-tab-btn"
             type="button"
             onClick={handleOpenInNewTab}
-            className="hidden sm:inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition-colors"
+            className="hidden md:inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition-colors"
             title="Open in new browser window"
           >
             <ExternalLink className="w-3.5 h-3.5 text-zinc-400" />
             <span>Open Tab</span>
-          </button>
-
-          {/* Download PDF Button */}
-          <button
-            id="pdf-preview-download-btn"
-            type="button"
-            onClick={handleDownload}
-            className="hidden sm:inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white border border-zinc-700 transition-colors"
-            title="Download PDF directly"
-          >
-            <Download className="w-3.5 h-3.5 text-zinc-400" />
-            <span>Download</span>
           </button>
 
           {/* Print / Share Button */}
@@ -359,7 +419,7 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
             title="Close preview"
           >
             <X className="w-4 h-4" />
-            <span>Cancel</span>
+            <span className="hidden sm:inline">Cancel</span>
           </button>
         </div>
       </header>
@@ -368,11 +428,14 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
       <main 
         id="pdf-preview-viewport" 
         ref={containerRef}
-        className="flex-1 w-full h-full bg-zinc-950 relative overflow-auto flex flex-col items-center"
+        className="flex-1 w-full h-full bg-zinc-950 relative overflow-auto overscroll-contain flex flex-col items-center py-3 sm:py-6 px-1.5 sm:px-4"
+        style={{
+          WebkitOverflowScrolling: 'touch',
+        }}
       >
         {viewMode === 'canvas' ? (
-          /* Canvas-based renderer (Works inside sandboxed iframes & Chrome with NO blocking) */
-          <div className="w-full flex-1 flex flex-col items-center py-6 px-2 sm:px-4 space-y-6">
+          /* Canvas-based renderer (Immune to Chrome iframe blocking & sandboxing) */
+          <div className="w-full flex-1 flex flex-col items-center">
             {isLoadingPdf && (
               <div className="my-auto flex flex-col items-center justify-center gap-3 text-zinc-400 py-16">
                 <RefreshCw className="w-8 h-8 animate-spin text-orange-500" />
@@ -404,28 +467,43 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
               </div>
             )}
 
-            {/* Generated Page Canvases */}
-            {Array.from({ length: numPages }, (_, index) => index + 1).map((pageNum) => (
-              <div 
-                key={pageNum} 
-                className="relative bg-white shadow-2xl rounded-sm overflow-hidden transition-transform border border-zinc-800"
-              >
-                <div className="absolute top-2 right-2 z-10 bg-zinc-900/80 backdrop-blur-xs text-zinc-300 text-[10px] font-mono px-1.5 py-0.5 rounded opacity-60 hover:opacity-100">
-                  Page {pageNum}
-                </div>
-                <canvas
-                  ref={(el) => {
-                    if (el) canvasRefs.current.set(pageNum, el);
-                    else canvasRefs.current.delete(pageNum);
+            {/* Generated Page Canvases with gesture support */}
+            <div 
+              className="w-full flex flex-col items-center gap-4 sm:gap-6 pb-24"
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              onDoubleClick={handleDoubleTap}
+            >
+              {Array.from({ length: numPages }, (_, index) => index + 1).map((pageNum) => (
+                <div 
+                  key={pageNum} 
+                  className="relative bg-white shadow-2xl rounded-sm overflow-hidden border border-zinc-800 transition-all select-none"
+                  style={{
+                    width: 'fit-content',
+                    maxWidth: 'none',
                   }}
-                  className="block mx-auto max-w-full"
-                />
-              </div>
-            ))}
+                >
+                  <div className="absolute top-2 right-2 z-10 bg-zinc-900/80 backdrop-blur-xs text-zinc-300 text-[10px] font-mono px-1.5 py-0.5 rounded opacity-60 hover:opacity-100 pointer-events-none">
+                    Page {pageNum}
+                  </div>
+                  <canvas
+                    ref={(el) => {
+                      if (el) canvasRefs.current.set(pageNum, el);
+                      else canvasRefs.current.delete(pageNum);
+                    }}
+                    className="block"
+                    style={{
+                      touchAction: 'pan-x pan-y',
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
           </div>
         ) : (
           /* Native Object / Iframe Mode */
-          <div className="w-full h-full flex-1 flex flex-col relative bg-zinc-900">
+          <div className="w-full h-full flex-1 flex flex-col relative bg-zinc-900 pb-16">
             {/* Chrome Notice bar if embedded iframe is blocked */}
             <div className="bg-amber-950/60 border-b border-amber-800/40 px-4 py-2 text-xs text-amber-200/90 flex items-center justify-between gap-3 shrink-0">
               <span className="truncate">
@@ -466,17 +544,80 @@ export const PdfPreviewModal: React.FC<PdfPreviewModalProps> = ({
             )}
           </div>
         )}
-
-        {/* Footer Notice */}
-        <footer className="w-full bg-zinc-900/95 border-t border-zinc-800/80 px-4 py-2 text-center text-xs text-zinc-400 shrink-0 flex items-center justify-between sm:justify-center gap-4">
-          <span className="hidden sm:inline">
-            Reviewing <strong>{previewData.filename}</strong>
-          </span>
-          <span>
-            Click <strong>Print / Share</strong> to trigger the native share dialog or save the file.
-          </span>
-        </footer>
       </main>
+
+      {/* Floating Bottom Toolbar for Zoom & Navigation (Always Accessible on Mobile & Desktop) */}
+      {viewMode === 'canvas' && !isLoadingPdf && !renderError && (
+        <div 
+          id="pdf-preview-bottom-bar"
+          className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[160] flex items-center gap-1 sm:gap-2 bg-zinc-900/95 backdrop-blur-md border border-zinc-700/80 shadow-2xl px-2.5 sm:px-3 py-1.5 rounded-full text-zinc-200 animate-in slide-in-from-bottom-3 duration-200"
+        >
+          <button
+            type="button"
+            onClick={() => setScale(s => Math.max(0.5, Number((s - 0.15).toFixed(2))))}
+            className="p-1.5 hover:bg-zinc-800 active:scale-90 rounded-full text-zinc-300 hover:text-white transition-all"
+            title="Zoom Out (-)"
+          >
+            <ZoomOut className="w-4 h-4" />
+          </button>
+          
+          <button
+            type="button"
+            onClick={() => {
+              const fitW = calculateFitWidthScale();
+              if (Math.abs(scale - fitW) < 0.1) {
+                setScale(1.35);
+              } else {
+                handleFitWidth();
+              }
+            }}
+            className="text-xs font-mono px-2 py-1 rounded-md hover:bg-zinc-800 text-zinc-300 font-semibold select-none transition-colors flex items-center gap-1"
+            title="Tap to toggle Fit Width / Readable 135%"
+          >
+            <span>{Math.round(scale * 100)}%</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setScale(s => Math.min(3.0, Number((s + 0.15).toFixed(2))))}
+            className="p-1.5 hover:bg-zinc-800 active:scale-90 rounded-full text-zinc-300 hover:text-white transition-all"
+            title="Zoom In (+)"
+          >
+            <ZoomIn className="w-4 h-4" />
+          </button>
+
+          <div className="h-4 w-px bg-zinc-700 mx-0.5" />
+
+          <button
+            type="button"
+            onClick={handleFitWidth}
+            className="text-[11px] sm:text-xs font-medium px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 active:scale-95 rounded-full text-orange-400 hover:text-orange-300 transition-colors flex items-center gap-1"
+            title="Fit to Screen Width"
+          >
+            <Maximize2 className="w-3.5 h-3.5" />
+            <span>Fit Width</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleReadableZoom}
+            className="text-[11px] sm:text-xs font-medium px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 active:scale-95 rounded-full text-zinc-300 hover:text-white transition-colors flex items-center gap-1"
+            title="Readable Text Size (135%)"
+          >
+            <MoveHorizontal className="w-3.5 h-3.5" />
+            <span>Readable</span>
+          </button>
+
+          {numPages > 0 && (
+            <>
+              <div className="h-4 w-px bg-zinc-700 mx-0.5" />
+              <span className="text-[11px] font-mono text-zinc-400 px-1 select-none">
+                {numPages} {numPages === 1 ? 'pg' : 'pgs'}
+              </span>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 };
