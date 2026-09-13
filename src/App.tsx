@@ -34,7 +34,10 @@ import {
   Share2,
   ArrowUpDown,
   CheckCheck,
-  FileCode
+  FileCode,
+  Menu,
+  Shield,
+  Sparkles
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { db, type Transaction, type Order, type OrderPayment, type OrderItem } from './db';
@@ -817,6 +820,7 @@ export default function App() {
   const [isAdmin, setIsAdmin] = useState(localStorage.getItem('BT_IS_ADMIN') === 'true');
   const [toast, setToast] = useState<{ message: string, type: 'success' | 'error' | 'info' } | null>(null);
   const [pdfPreviewData, setPdfPreviewData] = useState<PdfPreviewData | null>(null);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setToast({ message, type });
@@ -943,6 +947,23 @@ export default function App() {
     setPdfPreviewData(null);
     return true;
   }, !!pdfPreviewData, 100);
+
+  // Back handler to close collapsible sidebar
+  useBackHandler(() => {
+    setIsSidebarOpen(false);
+    return true;
+  }, isSidebarOpen, 90);
+
+  // Close collapsible sidebar on Escape key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isSidebarOpen) {
+        setIsSidebarOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isSidebarOpen]);
 
   // --- Auth ---
   const handleLogin = (e: React.FormEvent<HTMLFormElement>) => {
@@ -1212,22 +1233,51 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans pb-24">
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans pb-10">
       {/* Header */}
-      <header className="sticky top-0 z-50 bg-zinc-950/80 backdrop-blur-md border-b border-zinc-800 px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-orange-500 rounded-xl flex items-center justify-center">
-            <Building2 className="text-white w-6 h-6" />
+      <header className="sticky top-0 z-40 bg-zinc-950/85 backdrop-blur-md border-b border-zinc-800 px-4 sm:px-6 py-3.5 flex items-center justify-between">
+        <motion.button
+          type="button"
+          onClick={() => setIsSidebarOpen(true)}
+          whileHover={{ scale: 1.02 }}
+          whileTap={{ scale: 0.96 }}
+          className="flex items-center gap-3 text-left group p-1.5 -ml-1.5 rounded-2xl hover:bg-zinc-900/90 active:bg-zinc-850 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
+          title="Open Menu Sidebar"
+          aria-label="Open Navigation Menu"
+        >
+          <div className="relative w-11 h-11 bg-gradient-to-tr from-orange-600 via-orange-500 to-amber-500 rounded-2xl flex items-center justify-center shadow-lg shadow-orange-500/25 ring-2 ring-orange-500/30 group-hover:ring-orange-500/60 group-hover:shadow-orange-500/40 transition-all shrink-0">
+            <Building2 className="text-white w-6 h-6 transition-transform group-hover:scale-105" />
+            <span className="absolute -bottom-1 -right-1 w-4 h-4 bg-zinc-900 border border-zinc-700 rounded-full flex items-center justify-center text-zinc-400 group-hover:text-orange-400 transition-colors shadow-sm">
+              <Menu className="w-2.5 h-2.5" />
+            </span>
           </div>
           <div>
-            <h2 className="font-bold text-lg leading-tight">KhataBook Pro</h2>
-            <div className="text-zinc-500 text-xs flex items-center gap-1" title={syncStatusTitle}>
-              <div className={`w-2 h-2 rounded-full ${syncStatusDotClass}`} />
-              {syncStatusLabel}
+            <div className="flex items-center gap-1.5">
+              <h2 className="font-bold text-lg leading-tight tracking-tight group-hover:text-orange-400 transition-colors">KhataBook Pro</h2>
+              <ChevronRight className="w-4 h-4 text-zinc-600 group-hover:text-orange-400 transition-transform group-hover:translate-x-0.5" />
+            </div>
+            <div className="text-zinc-500 text-xs flex items-center gap-1.5 mt-0.5" title={syncStatusTitle}>
+              <span className="relative flex h-2 w-2">
+                {isSyncing ? (
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-orange-400 opacity-75" />
+                ) : hasPendingSync ? (
+                  <span className="animate-pulse absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
+                ) : (
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-30" />
+                )}
+                <span className={`relative inline-flex rounded-full h-2 w-2 ${syncStatusDotClass}`} />
+              </span>
+              <span>{syncStatusLabel}</span>
             </div>
           </div>
-        </div>
+        </motion.button>
+
         <div className="flex items-center gap-2">
+          {/* Active Tab indicator badge */}
+          <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 rounded-xl bg-zinc-900/80 border border-zinc-800 text-xs text-zinc-400">
+            <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />
+            <span className="font-medium text-zinc-300">{activeTab}</span>
+          </div>
           <button 
             onClick={() => void syncWithGoogleSheets('manual')}
             disabled={isSyncing || !apiLink}
@@ -1239,6 +1289,7 @@ export default function App() {
           <button 
             onClick={() => setIsLoggedIn(false)}
             className="p-2 hover:bg-zinc-800 rounded-full transition-colors text-zinc-400"
+            title="Logout"
           >
             <LogOut className="w-5 h-5" />
           </button>
@@ -1329,7 +1380,7 @@ export default function App() {
             initial={{ opacity: 0, y: 50, x: '-50%' }}
             animate={{ opacity: 1, y: 0, x: '-50%' }}
             exit={{ opacity: 0, y: 50, x: '-50%' }}
-            className={`fixed bottom-24 left-1/2 bg-zinc-800 text-white px-6 py-3 rounded-full shadow-2xl z-[200] border border-zinc-700 text-sm font-medium flex items-center gap-2 ${
+            className={`fixed bottom-6 left-1/2 bg-zinc-800 text-white px-6 py-3 rounded-full shadow-2xl z-[200] border border-zinc-700 text-sm font-medium flex items-center gap-2 ${
               toast.type === 'success' ? 'border-green-500/50' : 
               toast.type === 'error' ? 'border-red-500/50' : ''
             }`}
@@ -1348,24 +1399,158 @@ export default function App() {
             initial={{ opacity: 0, y: 50 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 50 }}
-            className="fixed bottom-24 left-1/2 -translate-x-1/2 bg-zinc-800 text-white px-6 py-3 rounded-full shadow-2xl z-[100] border border-zinc-700 text-sm font-medium"
+            className="fixed bottom-6 left-1/2 -translate-x-1/2 bg-zinc-800 text-white px-6 py-3 rounded-full shadow-2xl z-[100] border border-zinc-700 text-sm font-medium"
           >
             Press back again to exit
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Bottom Navigation */}
-      <nav className="fixed bottom-0 left-0 right-0 bg-zinc-900/95 backdrop-blur-xl border-t border-zinc-800 px-2 pb-6 pt-3 z-50 pb-safe overflow-x-auto no-scrollbar">
-        <div className="min-w-max sm:min-w-0 max-w-4xl mx-auto flex justify-around items-center gap-1 px-2">
-          <NavItem icon={LayoutDashboard} label="Home" active={activeTab === 'Dashboard'} onClick={() => navigateToTab('Dashboard')} />
-          <NavItem icon={ArrowUpRight} label="Txs" active={activeTab === 'Transactions'} onClick={() => navigateToTab('Transactions')} />
-          <NavItem icon={Package} label="Orders" active={activeTab === 'Orders'} onClick={() => navigateToTab('Orders')} />
-          <NavItem icon={History} label="Passbook" active={activeTab === 'Passbook'} onClick={() => navigateToTab('Passbook')} />
-          <NavItem icon={FileText} label="Reports" active={activeTab === 'Reports'} onClick={() => navigateToTab('Reports')} />
-          <NavItem icon={Settings} label="Admin" active={activeTab === 'Admin'} onClick={() => navigateToTab('Admin')} />
-        </div>
-      </nav>
+      {/* Collapsible Vertical Sidebar Drawer */}
+      <AnimatePresence>
+        {isSidebarOpen && (
+          <div className="fixed inset-0 z-50 overflow-hidden">
+            {/* Backdrop: Animated fade & blur */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.25, ease: 'easeOut' }}
+              onClick={() => setIsSidebarOpen(false)}
+              className="absolute inset-0 bg-black/80 backdrop-blur-md cursor-pointer"
+              aria-label="Close sidebar backdrop"
+            />
+
+            {/* Sidebar Drawer Panel */}
+            <motion.aside
+              initial={{ x: '-100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '-100%' }}
+              transition={{ type: 'spring', damping: 30, stiffness: 320, mass: 0.8 }}
+              className="relative w-84 max-w-[86vw] h-full bg-gradient-to-b from-zinc-900 via-zinc-900 to-zinc-950 border-r border-zinc-800/80 shadow-2xl flex flex-col justify-between z-10 select-none overflow-hidden"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Subtle ambient lighting inside the drawer */}
+              <div className="pointer-events-none absolute -top-24 -left-24 w-64 h-64 bg-orange-500/10 rounded-full blur-3xl" />
+              <div className="pointer-events-none absolute bottom-10 right-0 w-48 h-48 bg-amber-500/5 rounded-full blur-2xl" />
+
+              {/* Top Header inside Sidebar */}
+              <div className="relative p-5 border-b border-zinc-800/80 flex items-center justify-between bg-zinc-950/60 backdrop-blur-md">
+                <div className="flex items-center gap-3">
+                  <div className="w-11 h-11 bg-gradient-to-tr from-orange-600 via-orange-500 to-amber-500 rounded-2xl flex items-center justify-center shadow-lg shadow-orange-500/25 ring-2 ring-orange-500/30">
+                    <Building2 className="text-white w-6 h-6" />
+                  </div>
+                  <div>
+                    <h2 className="font-bold text-base leading-tight text-white tracking-tight">KhataBook Pro</h2>
+                    <div className="text-zinc-500 text-xs flex items-center gap-1.5 mt-0.5" title={syncStatusTitle}>
+                      <span className="relative flex h-2 w-2">
+                        <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${hasPendingSync ? 'bg-amber-400' : 'bg-emerald-400'} opacity-50`} />
+                        <span className={`relative inline-flex rounded-full h-2 w-2 ${syncStatusDotClass}`} />
+                      </span>
+                      <span>{syncStatusLabel}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <motion.button
+                  type="button"
+                  whileHover={{ rotate: 90, scale: 1.1 }}
+                  whileTap={{ scale: 0.9 }}
+                  onClick={() => setIsSidebarOpen(false)}
+                  className="p-2 text-zinc-400 hover:text-white hover:bg-zinc-800/80 rounded-xl transition-colors border border-transparent hover:border-zinc-700/60"
+                  title="Close sidebar (Esc)"
+                  aria-label="Close menu"
+                >
+                  <X className="w-5 h-5" />
+                </motion.button>
+              </div>
+
+              {/* Navigation Items (Unified Vertical List with Staggered Cascading Animation) */}
+              <div className="relative flex-1 overflow-y-auto px-3.5 py-4 space-y-1.5 no-scrollbar">
+                <div className="px-3 pb-2 text-[10px] font-bold text-zinc-500 uppercase tracking-widest flex items-center justify-between">
+                  <span>Navigation Menu</span>
+                  <span className="text-[9px] text-zinc-600 font-medium">KhataBook</span>
+                </div>
+
+                {[
+                  { id: 'Dashboard', label: 'Home', subtitle: 'Overview & Statistics', icon: LayoutDashboard },
+                  { id: 'Transactions', label: 'Transactions', subtitle: 'Ledger & Cash Flow', icon: ArrowUpRight },
+                  { id: 'Orders', label: 'Orders', subtitle: 'Bills, Invoices & Quotations', icon: Package },
+                  { id: 'Passbook', label: 'Passbook', subtitle: 'Account Statements', icon: History },
+                  { id: 'Reports', label: 'Reports', subtitle: 'PDF Statements & Excel', icon: FileText },
+                  { id: 'Admin', label: 'Admin & Settings', subtitle: 'Google Sheet Sync & Backup', icon: Settings },
+                ].map((item, idx) => {
+                  const isActive = activeTab === item.id;
+                  const Icon = item.icon;
+                  return (
+                    <motion.button
+                      key={item.id}
+                      type="button"
+                      initial={{ opacity: 0, x: -20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: 0.035 * idx, type: 'spring', damping: 24, stiffness: 280 }}
+                      whileHover={{ x: 5 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => {
+                        navigateToTab(item.id as Tab);
+                        setIsSidebarOpen(false);
+                      }}
+                      className={`w-full flex items-center gap-3.5 px-3.5 py-3 rounded-2xl text-left transition-all group relative overflow-hidden ${
+                        isActive
+                          ? 'bg-gradient-to-r from-orange-500/20 via-orange-500/10 to-transparent text-orange-400 border border-orange-500/35 shadow-sm'
+                          : 'text-zinc-300 hover:text-white hover:bg-zinc-800/60 border border-transparent'
+                      }`}
+                    >
+                      {isActive && (
+                        <motion.div
+                          layoutId="activeBarIndicator"
+                          className="absolute left-0 top-2 bottom-2 w-1 bg-gradient-to-b from-orange-500 to-amber-500 rounded-r-full"
+                        />
+                      )}
+
+                      <div
+                        className={`p-2.5 rounded-xl transition-all shrink-0 ${
+                          isActive
+                            ? 'bg-gradient-to-tr from-orange-600 to-amber-500 text-white shadow-md shadow-orange-500/30'
+                            : 'bg-zinc-800/80 text-zinc-400 group-hover:text-white group-hover:bg-zinc-750'
+                        }`}
+                      >
+                        <Icon className="w-5 h-5" />
+                      </div>
+
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between">
+                          <span className="font-semibold text-sm leading-tight truncate">{item.label}</span>
+                          {isActive && (
+                            <span className="w-2 h-2 rounded-full bg-orange-500 shadow-sm shadow-orange-500" />
+                          )}
+                        </div>
+                        <p className="text-[11px] text-zinc-500 truncate mt-0.5">{item.subtitle}</p>
+                      </div>
+
+                      <ChevronRight
+                        className={`w-4 h-4 transition-all ${
+                          isActive
+                            ? 'text-orange-400 translate-x-0'
+                            : 'text-zinc-600 opacity-0 -translate-x-1 group-hover:opacity-100 group-hover:translate-x-0'
+                        }`}
+                      />
+                    </motion.button>
+                  );
+                })}
+              </div>
+
+              {/* Sidebar Footer */}
+              <div className="relative p-4 border-t border-zinc-800/80 bg-zinc-950/80 backdrop-blur-md">
+                <div className="text-center">
+                  <p className="text-[10px] font-medium text-zinc-500">KhataBook Pro • v1.0</p>
+                  <p className="text-[9px] text-zinc-600">made by VaibhavK</p>
+                </div>
+              </div>
+            </motion.aside>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Full-Screen PDF Preview Modal */}
       {pdfPreviewData && (
@@ -1381,20 +1566,6 @@ export default function App() {
 }
 
 // --- Sub-Components ---
-
-function NavItem({ icon: Icon, label, active, onClick }: { icon: any, label: string, active: boolean, onClick: () => void }) {
-  return (
-    <button 
-      onClick={onClick}
-      className={`flex flex-col items-center gap-1 px-2 sm:px-3 py-1 rounded-2xl transition-all shrink-0 ${active ? 'text-orange-500' : 'text-zinc-500'}`}
-    >
-      <div className={`p-1.5 sm:p-2 rounded-xl transition-all ${active ? 'bg-orange-500/10' : ''}`}>
-        <Icon className="w-5 h-5 sm:w-6 h-6" />
-      </div>
-      <span className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider">{label}</span>
-    </button>
-  );
-}
 
 function Dashboard({ 
   stats, 
