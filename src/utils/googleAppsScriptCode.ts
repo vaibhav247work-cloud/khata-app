@@ -263,6 +263,18 @@ function doGet(e) {
     });
   }
 
+  // Fast unified batch pull (fetches all sheets in a single roundtrip)
+  if (requestedSheet === "all") {
+    const allData = {};
+    Object.keys(SHEET_CONFIG).forEach(function(sheetName) {
+      allData[sheetName] = getRowsAsObjects_(setup.sheets[sheetName], SHEET_CONFIG[sheetName]);
+    });
+    return jsonResponse_({
+      success: true,
+      all: allData,
+    });
+  }
+
   const headers = getSheetHeaders_(requestedSheet);
   if (!headers) {
     return jsonResponse_({
@@ -278,21 +290,31 @@ function doGet(e) {
 }
 
 function doPost(e) {
-  const setup = ensureRequiredSheets_();
-
-  if (!e || !e.postData || !e.postData.contents) {
-    return jsonResponse_({ error: "Missing request body" });
-  }
-
-  let payload;
+  // Use ScriptLock to prevent Google Sheets concurrent write collisions
+  var lock = LockService.getScriptLock();
+  var lockAcquired = false;
   try {
-    payload = JSON.parse(e.postData.contents);
-  } catch (error) {
-    return jsonResponse_({ error: "Invalid JSON body" });
+    lockAcquired = lock.tryLock(15000);
+  } catch (lockErr) {
+    lockAcquired = false;
   }
 
-  const action = payload.action;
-  const sheetName = payload.sheet;
+  try {
+    const setup = ensureRequiredSheets_();
+
+    if (!e || !e.postData || !e.postData.contents) {
+      return jsonResponse_({ error: "Missing request body" });
+    }
+
+    let payload;
+    try {
+      payload = JSON.parse(e.postData.contents);
+    } catch (error) {
+      return jsonResponse_({ error: "Invalid JSON body" });
+    }
+
+    const action = payload.action;
+    const sheetName = payload.sheet;
 
   if (action === "setup") {
     return jsonResponse_({
@@ -440,5 +462,12 @@ function doPost(e) {
     deleted: deletedCount,
     duplicatesRemoved: result.duplicatesRemoved,
   });
+  } finally {
+    if (lockAcquired) {
+      try {
+        lock.releaseLock();
+      } catch (e) {}
+    }
+  }
 }
 `;

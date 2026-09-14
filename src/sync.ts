@@ -56,16 +56,72 @@ const serializePayment = (payment: OrderPayment): SheetRow => ({
   synced: true,
 });
 
-const requestJson = async (apiLink: string, init: RequestInit) => {
-  const response = await fetch(apiLink, { ...init, mode: 'cors' });
-  if (!response.ok) {
-    throw new Error(`Google Sheets request failed (${response.status})`);
+const requestJson = async (
+  apiLink: string, 
+  init: RequestInit, 
+  maxRetries = 2, 
+  baseDelay = 1200
+): Promise<any> => {
+  let lastError: any;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    // 25 second timeout to prevent hanging connections
+    const timer = setTimeout(() => controller.abort(), 25000);
+
+    try {
+      const response = await fetch(apiLink, { 
+        ...init, 
+        mode: 'cors',
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+
+      if (!response.ok) {
+        // HTTP 429, 500, 502, 503, 504 are standard temporary Apps Script cold-start or busy states
+        if ([429, 500, 502, 503, 504].includes(response.status) && attempt < maxRetries) {
+          const delay = baseDelay * Math.pow(1.6, attempt);
+          console.warn(`[Sync] Google Apps Script HTTP ${response.status}. Retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})...`);
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
+        throw new Error(`Google Sheets request failed (${response.status})`);
+      }
+
+      const payload = await response.json();
+      if (payload?.error || payload?.success === false) {
+        const errorText = String(payload.error || '');
+        // If Google Sheets lock contention or script busy, retry automatically
+        if ((errorText.includes('timed out') || errorText.includes('busy') || errorText.includes('Lock')) && attempt < maxRetries) {
+          const delay = baseDelay * Math.pow(1.6, attempt);
+          console.warn(`[Sync] Google Apps Script busy (${errorText}). Retrying in ${delay}ms...`);
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
+        throw new Error(payload.error || 'Google Sheets rejected the request');
+      }
+
+      return payload;
+    } catch (err: any) {
+      clearTimeout(timer);
+      lastError = err;
+      const isNetworkOrTimeout =
+        err?.name === 'AbortError' ||
+        err?.message?.includes('fetch') ||
+        err?.message?.includes('network') ||
+        err?.message?.includes('failed');
+
+      if (isNetworkOrTimeout && attempt < maxRetries) {
+        const delay = baseDelay * Math.pow(1.6, attempt);
+        console.warn(`[Sync] Network blip or cold start. Retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})...`, err);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      break;
+    }
   }
-  const payload = await response.json();
-  if (payload?.error || payload?.success === false) {
-    throw new Error(payload.error || 'Google Sheets rejected the request');
-  }
-  return payload;
+
+  throw lastError;
 };
 
 const syncSheet = async (apiLink: string, sheet: string, data: SheetRow[]) => {
@@ -195,18 +251,22 @@ export const pushLocalDataToGoogleSheets = async (apiLink: string) => {
   // First, push all deleted records so they are removed from Google Sheets
   await pushDeletedRecordsToGoogleSheets(apiLink);
 
-  // Then, push any unsynced local records
+  // Then, push any unsynced local records sequentially to prevent concurrent spreadsheet lock collisions
   const [transactions, orders, payments] = await Promise.all([
     db.transactions.filter((tx) => !tx.synced).toArray(),
     db.orders.filter((order) => !order.synced).toArray(),
     db.orderPayments.filter((payment) => !payment.synced).toArray(),
   ]);
 
-  await Promise.all([
-    syncSheet(apiLink, SHEET_NAMES.transactions, transactions.map(serializeTransaction)),
-    syncSheet(apiLink, SHEET_NAMES.orders, orders.map(serializeOrder)),
-    syncSheet(apiLink, SHEET_NAMES.payments, payments.map(serializePayment)),
-  ]);
+  if (transactions.length > 0) {
+    await syncSheet(apiLink, SHEET_NAMES.transactions, transactions.map(serializeTransaction));
+  }
+  if (orders.length > 0) {
+    await syncSheet(apiLink, SHEET_NAMES.orders, orders.map(serializeOrder));
+  }
+  if (payments.length > 0) {
+    await syncSheet(apiLink, SHEET_NAMES.payments, payments.map(serializePayment));
+  }
 };
 
 const getSheetRows = async (apiLink: string, sheet: string): Promise<SheetRow[]> => {
@@ -223,12 +283,37 @@ const asNumber = (value: string | number | boolean | undefined) => Number(value 
 const asString = (value: string | number | boolean | undefined) => String(value ?? '');
 
 const pullOnlineDataIntoLocalDb = async (apiLink: string) => {
-  const [transactionRows, orderRows, paymentRows, pendingDeletes] = await Promise.all([
-    getSheetRows(apiLink, SHEET_NAMES.transactions),
-    getSheetRows(apiLink, SHEET_NAMES.orders),
-    getSheetRows(apiLink, SHEET_NAMES.payments),
-    db.deletedRecords.toArray(),
-  ]);
+  const pendingDeletes = await db.deletedRecords.toArray();
+
+  let transactionRows: SheetRow[] = [];
+  let orderRows: SheetRow[] = [];
+  let paymentRows: SheetRow[] = [];
+  let batchSuccessful = false;
+
+  // 1. Try unified fast batch pull (fetches all sheets in a single HTTP request)
+  try {
+    const url = new URL(apiLink);
+    url.searchParams.set('sheet', 'all');
+    const response = await requestJson(url.toString(), { method: 'GET' }, 1, 800);
+    if (response && response.all && typeof response.all === 'object') {
+      transactionRows = Array.isArray(response.all.Transactions) ? response.all.Transactions : [];
+      orderRows = Array.isArray(response.all.Orders) ? response.all.Orders : [];
+      paymentRows = Array.isArray(response.all.OrderPayments) ? response.all.OrderPayments : [];
+      batchSuccessful = true;
+    }
+  } catch (batchErr) {
+    // Older script versions won't support sheet=all; smoothly fall back to individual requests
+    batchSuccessful = false;
+  }
+
+  // 2. Fallback to individual sheet pulls if batch is not supported by deployed script
+  if (!batchSuccessful) {
+    [transactionRows, orderRows, paymentRows] = await Promise.all([
+      getSheetRows(apiLink, SHEET_NAMES.transactions),
+      getSheetRows(apiLink, SHEET_NAMES.orders),
+      getSheetRows(apiLink, SHEET_NAMES.payments),
+    ]);
+  }
 
   const deletedIdSet = new Set(pendingDeletes.map((d) => d.id));
 
@@ -345,6 +430,13 @@ export const pushListToSheet = async (apiLink: string, sheet: string, items: str
 export const syncCategoriesWithGoogleSheets = async (apiLink: string) => {
   try {
     const isPending = isCategoriesSyncPending();
+    const localCategories = getStoredExpenseCategories();
+
+    // If local categories exist and no local category changes are pending, skip extra roundtrips
+    if (!isPending && localCategories.length > 0) {
+      return;
+    }
+
     let sheetRows: SheetRow[] = [];
     try {
       sheetRows = await getSheetRows(apiLink, SHEET_NAMES.categories);
@@ -360,8 +452,6 @@ export const syncCategoriesWithGoogleSheets = async (apiLink: string) => {
     const sheetCategories = sheetRows
       .map((r) => asString(r.name).trim())
       .filter((name) => name.length > 0);
-
-    const localCategories = getStoredExpenseCategories();
 
     if (isPending || sheetCategories.length === 0) {
       // Local changes exist or cloud sheet is empty: push local to Google Sheet
@@ -382,6 +472,13 @@ export const syncCategoriesWithGoogleSheets = async (apiLink: string) => {
 export const syncPaymentModesWithGoogleSheets = async (apiLink: string) => {
   try {
     const isPending = isPaymentModesSyncPending();
+    const localModes = getStoredPaymentModes();
+
+    // If local payment modes exist and no local mode changes are pending, skip extra roundtrips
+    if (!isPending && localModes.length > 0) {
+      return;
+    }
+
     let sheetRows: SheetRow[] = [];
     try {
       sheetRows = await getSheetRows(apiLink, SHEET_NAMES.paymentModes);
@@ -397,8 +494,6 @@ export const syncPaymentModesWithGoogleSheets = async (apiLink: string) => {
     const sheetModes = sheetRows
       .map((r) => asString(r.name).trim())
       .filter((name) => name.length > 0);
-
-    const localModes = getStoredPaymentModes();
 
     if (isPending || sheetModes.length === 0) {
       // Local changes exist or cloud sheet is empty: push local to Google Sheet
