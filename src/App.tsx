@@ -50,7 +50,16 @@ import {
   ArrowRightLeft,
   Send,
   Link as LinkIcon,
-  Key
+  Key,
+  PieChart as PieChartIcon,
+  TrendingUp,
+  TrendingDown,
+  Layers,
+  Copy,
+  BarChart3,
+  ChevronDown,
+  ChevronUp,
+  Info
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { db, type Transaction, type Order, type OrderPayment, type OrderItem } from './db';
@@ -98,6 +107,10 @@ import {
   PieChart, 
   Pie, 
   Cell,
+  AreaChart,
+  Area,
+  Legend,
+  Sector,
 } from 'recharts';
 import jsPDF from 'jspdf';
 import { autoTable } from 'jspdf-autotable';
@@ -128,6 +141,20 @@ type Tab = 'Dashboard' | 'Transactions' | 'Orders' | 'Passbook' | 'Reports' | 'A
 const PAYMENT_TYPES = DEFAULT_PAYMENT_MODES;
 
 const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8'];
+export const EXPENSE_PALETTE = [
+  '#f97316', // Orange
+  '#ef4444', // Red
+  '#3b82f6', // Blue
+  '#10b981', // Emerald
+  '#8b5cf6', // Violet
+  '#f59e0b', // Amber
+  '#06b6d4', // Cyan
+  '#ec4899', // Pink
+  '#14b8a6', // Teal
+  '#6366f1', // Indigo
+  '#84cc16', // Lime
+  '#d946ef', // Fuchsia
+];
 const SYNC_PENDING_KEY = 'BT_PENDING_SYNC';
 const LAST_SYNC_AT_KEY = 'BT_LAST_SYNC_AT';
 const AUTH_SESSION_KEY = 'BT_AUTH_SESSION';
@@ -1233,6 +1260,7 @@ export default function App() {
   activeTabRef.current = activeTab;
 
   const [orderInitialFilter, setOrderInitialFilter] = useState<'All' | 'Pending' | 'Partial' | 'Completed' | 'Overdue'>('All');
+  const [reportsInitialTab, setReportsInitialTab] = useState<'overview' | 'expenses' | 'income' | 'payments' | 'suppliers'>('overview');
 
   const navigateToTab = useCallback((newTab: Tab) => {
     setActiveTab(newTab);
@@ -2465,6 +2493,10 @@ export default function App() {
               onNavigateToOrders={handleNavigateToOrders}
               onOpenAddTransaction={handleOpenAddTxnFromHome}
               onOpenAddOrder={handleOpenAddOrderFromHome}
+              onNavigateToReports={(subTab?: any) => {
+                if (subTab) setReportsInitialTab(subTab);
+                navigateToTab('Reports');
+              }}
             />
           )}
           {activeTab === 'Transactions' && (
@@ -2513,6 +2545,7 @@ export default function App() {
               orders={orders} 
               showToast={showToast} 
               onPreviewPdf={setPdfPreviewData}
+              initialTab={reportsInitialTab}
             />
           )}
           {activeTab === 'Admin' && (
@@ -3257,6 +3290,7 @@ function Dashboard({
   onNavigateToOrders,
   onOpenAddTransaction,
   onOpenAddOrder,
+  onNavigateToReports,
 }: { 
   stats: any; 
   transactions: Transaction[]; 
@@ -3265,10 +3299,106 @@ function Dashboard({
   onNavigateToOrders?: () => void;
   onOpenAddTransaction?: () => void;
   onOpenAddOrder?: () => void;
+  onNavigateToReports?: (subTab?: 'overview' | 'expenses' | 'income' | 'payments' | 'suppliers') => void;
 }) {
+  const [expenseTimeframe, setExpenseTimeframe] = useState<'all' | 'this_month' | 'last_30_days' | 'this_week'>('all');
+  const [activeCategoryIndex, setActiveCategoryIndex] = useState<number | null>(null);
+
   const recentTxs = useMemo(() => {
     return [...transactions].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
   }, [transactions]);
+
+  // Filter and aggregate debit / expense transactions by category
+  const expenseCategoryData = useMemo(() => {
+    const now = new Date();
+    const filteredDebits = transactions.filter((t) => {
+      if (t.type !== 'Debit') return false;
+      const amt = Number(t.amount) || 0;
+      if (amt <= 0) return false;
+
+      if (expenseTimeframe === 'all') return true;
+      try {
+        const txDate = parseISO(t.date);
+        if (expenseTimeframe === 'this_week') {
+          return isWithinInterval(txDate, { 
+            start: startOfWeek(now, { weekStartsOn: 1 }), 
+            end: endOfWeek(now, { weekStartsOn: 1 }) 
+          });
+        }
+        if (expenseTimeframe === 'this_month') {
+          return isWithinInterval(txDate, { start: startOfMonth(now), end: endOfMonth(now) });
+        }
+        if (expenseTimeframe === 'last_30_days') {
+          return isWithinInterval(txDate, { start: subDays(now, 30), end: now });
+        }
+      } catch {
+        return true;
+      }
+      return true;
+    });
+
+    const categoryMap = new Map<string, { total: number; count: number }>();
+    let grandTotal = 0;
+
+    filteredDebits.forEach((t) => {
+      const amt = Number(t.amount) || 0;
+      grandTotal += amt;
+      const cat = t.category || 'General';
+      const cur = categoryMap.get(cat) || { total: 0, count: 0 };
+      categoryMap.set(cat, { total: cur.total + amt, count: cur.count + 1 });
+    });
+
+    const items = Array.from(categoryMap.entries())
+      .map(([name, data]) => ({
+        name,
+        value: data.total,
+        count: data.count,
+        percentage: grandTotal > 0 ? (data.total / grandTotal) * 100 : 0,
+      }))
+      .sort((a, b) => b.value - a.value);
+
+    const avgPerTxn = filteredDebits.length > 0 ? Math.round(grandTotal / filteredDebits.length) : 0;
+
+    return { 
+      items, 
+      total: grandTotal, 
+      txnCount: filteredDebits.length,
+      avgPerTxn,
+      topCategory: items[0] || null,
+    };
+  }, [transactions, expenseTimeframe]);
+
+  // Clean active shape for Donut chart in Dashboard
+  const renderDashboardActiveShape = useCallback((props: any) => {
+    const { cx, cy, innerRadius, outerRadius, startAngle, endAngle, fill } = props;
+    return (
+      <g>
+        <Sector
+          cx={cx}
+          cy={cy}
+          innerRadius={innerRadius - 2}
+          outerRadius={outerRadius + 5}
+          startAngle={startAngle}
+          endAngle={endAngle}
+          fill={fill}
+        />
+        <Sector
+          cx={cx}
+          cy={cy}
+          startAngle={startAngle}
+          endAngle={endAngle}
+          innerRadius={outerRadius + 7}
+          outerRadius={outerRadius + 9}
+          fill={fill}
+          opacity={0.35}
+        />
+      </g>
+    );
+  }, []);
+
+  const activeCategoryItem = activeCategoryIndex !== null && expenseCategoryData.items[activeCategoryIndex] 
+    ? expenseCategoryData.items[activeCategoryIndex] 
+    : null;
 
   return (
     <motion.div 
@@ -3355,6 +3485,289 @@ function Dashboard({
         />
       </div>
 
+      {/* Expense Distribution by Category (Clean Interactive Donut Chart) */}
+      <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-5 sm:p-6 shadow-sm space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-2xl bg-orange-500/10 border border-orange-500/25 flex items-center justify-center text-orange-400 shrink-0">
+              <PieChartIcon className="w-4 h-4" />
+            </div>
+            <div>
+              <h3 className="font-bold text-base sm:text-lg text-white">Expense Distribution by Category</h3>
+              <p className="text-zinc-500 text-[11px]">Visual analysis of your business spending habits</p>
+            </div>
+          </div>
+
+          {/* Timeframe Selector & Reports Link */}
+          <div className="flex items-center gap-2 self-start sm:self-auto flex-wrap">
+            <div className="flex items-center p-1 bg-zinc-950/80 rounded-xl border border-zinc-800/80 text-[11px]">
+              <button
+                type="button"
+                onClick={() => { setExpenseTimeframe('this_week'); setActiveCategoryIndex(null); }}
+                className={`px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
+                  expenseTimeframe === 'this_week'
+                    ? 'bg-zinc-800 text-white shadow-xs'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                Week
+              </button>
+              <button
+                type="button"
+                onClick={() => { setExpenseTimeframe('this_month'); setActiveCategoryIndex(null); }}
+                className={`px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
+                  expenseTimeframe === 'this_month'
+                    ? 'bg-zinc-800 text-white shadow-xs'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                This Month
+              </button>
+              <button
+                type="button"
+                onClick={() => { setExpenseTimeframe('last_30_days'); setActiveCategoryIndex(null); }}
+                className={`px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
+                  expenseTimeframe === 'last_30_days'
+                    ? 'bg-zinc-800 text-white shadow-xs'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                30 Days
+              </button>
+              <button
+                type="button"
+                onClick={() => { setExpenseTimeframe('all'); setActiveCategoryIndex(null); }}
+                className={`px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
+                  expenseTimeframe === 'all'
+                    ? 'bg-zinc-800 text-white shadow-xs'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                All Time
+              </button>
+            </div>
+
+            {onNavigateToReports && (
+              <button
+                type="button"
+                onClick={() => onNavigateToReports('expenses')}
+                className="text-xs font-semibold text-orange-400 hover:text-orange-300 flex items-center gap-0.5 px-2.5 py-1.5 rounded-xl hover:bg-orange-500/10 transition-colors shrink-0 cursor-pointer"
+                title="Open detailed Reports & Analytics"
+              >
+                <span>Report</span>
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Quick Spending Habit Insights Strip */}
+        {expenseCategoryData.items.length > 0 && (
+          <div className="grid grid-cols-3 gap-2 p-2.5 rounded-2xl bg-zinc-950/60 border border-zinc-800/70 text-[11px]">
+            <div className="text-left px-1">
+              <span className="text-zinc-500 text-[10px] block font-medium">Top Category</span>
+              <span className="font-bold text-orange-400 truncate block">
+                {expenseCategoryData.topCategory?.name || 'None'}
+              </span>
+            </div>
+            <div className="text-center px-1 border-x border-zinc-800/80">
+              <span className="text-zinc-500 text-[10px] block font-medium">Category Share</span>
+              <span className="font-bold text-white font-mono block">
+                {expenseCategoryData.topCategory ? `${expenseCategoryData.topCategory.percentage.toFixed(1)}%` : '0%'}
+              </span>
+            </div>
+            <div className="text-right px-1">
+              <span className="text-zinc-500 text-[10px] block font-medium">Avg Spend / Txn</span>
+              <span className="font-bold text-emerald-400 font-mono block">
+                ₹{expenseCategoryData.avgPerTxn.toLocaleString('en-IN')}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {expenseCategoryData.items.length === 0 ? (
+          <div className="p-8 text-center rounded-2xl bg-zinc-950/40 border border-zinc-800/60 space-y-2">
+            <p className="text-zinc-400 text-xs font-medium">No expense records logged in this timeframe</p>
+            <p className="text-zinc-500 text-[11px] max-w-sm mx-auto">
+              Add your first material purchase or debit transaction to see your spending breakdown.
+            </p>
+            {onOpenAddTransaction && (
+              <button
+                type="button"
+                onClick={onOpenAddTransaction}
+                className="mt-2 px-3.5 py-1.5 rounded-xl bg-orange-600 hover:bg-orange-500 text-white text-xs font-semibold transition-all inline-flex items-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>+ Add Expense</span>
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-center pt-1">
+            {/* Donut Chart with Center Metric Callout */}
+            <div className="md:col-span-5 flex items-center justify-center">
+              <div className="w-48 h-48 sm:w-52 sm:h-52 relative">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={expenseCategoryData.items}
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={50}
+                      outerRadius={72}
+                      paddingAngle={3}
+                      dataKey="value"
+                      stroke="#18181b"
+                      strokeWidth={2}
+                      activeIndex={activeCategoryIndex !== null ? activeCategoryIndex : undefined}
+                      activeShape={renderDashboardActiveShape}
+                      onMouseEnter={(_, index) => setActiveCategoryIndex(index)}
+                      onMouseLeave={() => setActiveCategoryIndex(null)}
+                      onClick={(_, index) => {
+                        setActiveCategoryIndex(prev => prev === index ? null : index);
+                      }}
+                    >
+                      {expenseCategoryData.items.map((entry, index) => (
+                        <Cell 
+                          key={`expense-donut-${entry.name}-${index}`} 
+                          fill={EXPENSE_PALETTE[index % EXPENSE_PALETTE.length]} 
+                        />
+                      ))}
+                    </Pie>
+                    <Tooltip
+                      content={({ active, payload }) => {
+                        if (active && payload && payload.length) {
+                          const data = payload[0].payload;
+                          const fillColor = payload[0].payload.fill || payload[0].color || '#f97316';
+                          return (
+                            <div className="bg-zinc-950/95 border border-zinc-800 p-2.5 rounded-xl shadow-xl text-xs backdrop-blur-md z-50">
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: fillColor }} />
+                                <span className="font-bold text-white truncate max-w-[140px]">{data.name}</span>
+                              </div>
+                              <div className="text-zinc-200 font-mono font-semibold">
+                                ₹{data.value.toLocaleString('en-IN')}
+                                <span className="text-orange-400 ml-1.5 font-sans text-[11px] font-bold">
+                                  ({data.percentage.toFixed(1)}%)
+                                </span>
+                              </div>
+                              <div className="text-[10px] text-zinc-500 mt-0.5">
+                                {data.count} transaction{data.count === 1 ? '' : 's'}
+                              </div>
+                            </div>
+                          );
+                        }
+                        return null;
+                      }}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+
+                {/* Center Callout Metric (Dynamically updates when hovering/tapping) */}
+                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none text-center p-2 transition-all">
+                  {activeCategoryItem ? (
+                    <>
+                      <span 
+                        className="text-[10px] uppercase font-bold tracking-wider truncate max-w-[125px] px-2 py-0.5 rounded-full border mb-0.5"
+                        style={{ 
+                          color: EXPENSE_PALETTE[activeCategoryIndex! % EXPENSE_PALETTE.length],
+                          borderColor: `${EXPENSE_PALETTE[activeCategoryIndex! % EXPENSE_PALETTE.length]}40`,
+                          backgroundColor: `${EXPENSE_PALETTE[activeCategoryIndex! % EXPENSE_PALETTE.length]}18`
+                        }}
+                      >
+                        {activeCategoryItem.name}
+                      </span>
+                      <span className="text-sm sm:text-base font-black text-white font-mono tracking-tight">
+                        ₹{activeCategoryItem.value >= 100000 
+                          ? (activeCategoryItem.value / 100000).toFixed(1) + 'L' 
+                          : activeCategoryItem.value.toLocaleString('en-IN')}
+                      </span>
+                      <span className="text-[10px] text-zinc-300 font-medium">
+                        {activeCategoryItem.percentage.toFixed(1)}% · {activeCategoryItem.count} txn{activeCategoryItem.count === 1 ? '' : 's'}
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-[10px] uppercase font-bold tracking-wider text-zinc-500">Total Spent</span>
+                      <span className="text-base sm:text-lg font-black text-white font-mono tracking-tight">
+                        ₹{expenseCategoryData.total >= 100000 
+                          ? (expenseCategoryData.total / 100000).toFixed(1) + 'L' 
+                          : expenseCategoryData.total.toLocaleString('en-IN')}
+                      </span>
+                      <span className="text-[9px] text-zinc-500 font-medium">
+                        {expenseCategoryData.items.length} categor{expenseCategoryData.items.length === 1 ? 'y' : 'ies'} · {expenseCategoryData.txnCount} txns
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Ranked Category Distribution Breakdown */}
+            <div className="md:col-span-7 space-y-2">
+              <div className="flex items-center justify-between text-[11px] text-zinc-500 font-semibold uppercase tracking-wider pb-1 border-b border-zinc-800/60">
+                <span>Top Categories</span>
+                <span>Amount & Share</span>
+              </div>
+              {expenseCategoryData.items.slice(0, 5).map((item, index) => {
+                const color = EXPENSE_PALETTE[index % EXPENSE_PALETTE.length];
+                const isSelected = activeCategoryIndex === index;
+                return (
+                  <div 
+                    key={`exp-rank-${item.name}`} 
+                    className={`space-y-1 p-1.5 rounded-xl transition-all cursor-pointer ${
+                      isSelected ? 'bg-zinc-800/80 ring-1 ring-orange-500/40 shadow-xs' : 'hover:bg-zinc-850/50'
+                    }`}
+                    onMouseEnter={() => setActiveCategoryIndex(index)}
+                    onMouseLeave={() => setActiveCategoryIndex(null)}
+                    onClick={() => setActiveCategoryIndex(prev => prev === index ? null : index)}
+                  >
+                    <div className="flex items-center justify-between text-xs">
+                      <div className="flex items-center gap-2 min-w-0 pr-2">
+                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
+                        <span className={`font-medium truncate ${isSelected ? 'text-orange-300 font-bold' : 'text-zinc-200'}`}>
+                          {item.name}
+                        </span>
+                        <span className="text-[10px] text-zinc-500 shrink-0">({item.count})</span>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <span className="font-semibold text-white font-mono">₹{item.value.toLocaleString('en-IN')}</span>
+                        <span className="text-zinc-400 text-[11px] ml-1.5 tabular-nums font-medium">
+                          {item.percentage.toFixed(1)}%
+                        </span>
+                      </div>
+                    </div>
+                    {/* Visual proportion bar */}
+                    <div className="w-full bg-zinc-800/80 rounded-full h-1.5 overflow-hidden">
+                      <div 
+                        className="h-full rounded-full transition-all duration-500" 
+                        style={{ width: `${Math.max(item.percentage, 2.5)}%`, backgroundColor: color }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+
+              {expenseCategoryData.items.length > 5 && (
+                <div className="pt-1.5 flex items-center justify-between text-[11px] text-zinc-500">
+                  <span>+{expenseCategoryData.items.length - 5} more categories</span>
+                  {onNavigateToReports && (
+                    <button 
+                      type="button" 
+                      onClick={() => onNavigateToReports('expenses')} 
+                      className="text-orange-400 hover:text-orange-300 font-semibold underline underline-offset-2 transition-colors cursor-pointer"
+                    >
+                      See All in Reports →
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Recent Transactions Section */}
       <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6">
         <div 
           id="dashboard-recent-txs-header"
@@ -6218,36 +6631,302 @@ function PassbookModule({ transactions, filterDate, setFilterDate, customDateRan
   );
 }
 
-function ReportsModule({ transactions, orders, showToast, onPreviewPdf }: any) {
+function ReportsModule({ transactions, orders = [], showToast, onPreviewPdf, initialTab = 'overview' }: any) {
+  const [selectedPeriod, setSelectedPeriod] = useState<'this_week' | 'this_month' | 'last_month' | 'last_30_days' | 'this_quarter' | 'this_year' | 'all' | 'custom'>('this_month');
+  const [customStart, setCustomStart] = useState<string>(() => format(startOfMonth(new Date()), 'yyyy-MM-dd'));
+  const [customEnd, setCustomEnd] = useState<string>(() => format(endOfMonth(new Date()), 'yyyy-MM-dd'));
+  const [activeReportTab, setActiveReportTab] = useState<'overview' | 'expenses' | 'income' | 'payments' | 'suppliers'>(() => initialTab);
+  const [activeExpenseCatIndex, setActiveExpenseCatIndex] = useState<number | null>(null);
+  const [activeIncomeCatIndex, setActiveIncomeCatIndex] = useState<number | null>(null);
+  const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
+  const [reportSearchQuery, setReportSearchQuery] = useState('');
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [isExportingExcel, setIsExportingExcel] = useState(false);
+  const [isCopyingSummary, setIsCopyingSummary] = useState(false);
 
-  const creditTxs = transactions.filter((t: any) => t.type === 'Credit');
-  const debitTxs = transactions.filter((t: any) => t.type === 'Debit');
+  useEffect(() => {
+    if (initialTab) {
+      setActiveReportTab(initialTab);
+    }
+  }, [initialTab]);
 
-  const creditCategoryData = useMemo(() => {
-    const counts: any = {};
-    transactions.filter((t: any) => t.type === 'Credit').forEach((t: any) => {
-      counts[t.category] = (counts[t.category] || 0) + t.amount;
+  // Compute active date range interval & human-readable label
+  const { periodLabel, startDate, endDate } = useMemo(() => {
+    const now = new Date();
+    if (selectedPeriod === 'this_week') {
+      const s = startOfWeek(now, { weekStartsOn: 1 });
+      const e = endOfWeek(now, { weekStartsOn: 1 });
+      return { periodLabel: `This Week (${format(s, 'dd MMM')} - ${format(e, 'dd MMM')})`, startDate: s, endDate: e };
+    }
+    if (selectedPeriod === 'this_month') {
+      const s = startOfMonth(now);
+      const e = endOfMonth(now);
+      return { periodLabel: format(s, 'MMMM yyyy'), startDate: s, endDate: e };
+    }
+    if (selectedPeriod === 'last_month') {
+      const prev = subMonths(now, 1);
+      const s = startOfMonth(prev);
+      const e = endOfMonth(prev);
+      return { periodLabel: format(s, 'MMMM yyyy'), startDate: s, endDate: e };
+    }
+    if (selectedPeriod === 'last_30_days') {
+      const s = subDays(now, 30);
+      return { periodLabel: 'Last 30 Days', startDate: s, endDate: now };
+    }
+    if (selectedPeriod === 'this_quarter') {
+      const s = subMonths(now, 3);
+      return { periodLabel: 'This Quarter (Last 3 Months)', startDate: s, endDate: now };
+    }
+    if (selectedPeriod === 'this_year') {
+      const s = startOfYear(now);
+      const e = endOfYear(now);
+      return { periodLabel: `Year ${format(now, 'yyyy')} (YTD)`, startDate: s, endDate: e };
+    }
+    if (selectedPeriod === 'custom') {
+      try {
+        const s = startOfDay(parseISO(customStart));
+        const e = endOfDay(parseISO(customEnd));
+        return {
+          periodLabel: `${format(s, 'dd MMM yyyy')} - ${format(e, 'dd MMM yyyy')}`,
+          startDate: s,
+          endDate: e,
+        };
+      } catch {
+        return { periodLabel: 'Custom Period', startDate: null, endDate: null };
+      }
+    }
+    return { periodLabel: 'All Recorded Time', startDate: null, endDate: null };
+  }, [selectedPeriod, customStart, customEnd]);
+
+  // Filter transactions by selected date range
+  const filteredTxs = useMemo(() => {
+    if (selectedPeriod === 'all' || !startDate || !endDate) {
+      return transactions || [];
+    }
+    return (transactions || []).filter((t: any) => {
+      try {
+        const d = parseISO(t.date);
+        return isWithinInterval(d, { start: startDate, end: endDate });
+      } catch {
+        return true;
+      }
     });
-    return Object.entries(counts).map(([name, value]) => ({ name, value }));
-  }, [transactions]);
+  }, [transactions, selectedPeriod, startDate, endDate]);
 
+  // Filter orders by selected date range
+  const filteredOrders = useMemo(() => {
+    if (selectedPeriod === 'all' || !startDate || !endDate) {
+      return orders || [];
+    }
+    return (orders || []).filter((o: any) => {
+      try {
+        const d = parseISO(o.date);
+        return isWithinInterval(d, { start: startDate, end: endDate });
+      } catch {
+        return true;
+      }
+    });
+  }, [orders, selectedPeriod, startDate, endDate]);
+
+  // High-level financial calculations
+  const creditTxs = useMemo(() => filteredTxs.filter((t: any) => t.type === 'Credit'), [filteredTxs]);
+  const debitTxs = useMemo(() => filteredTxs.filter((t: any) => t.type === 'Debit'), [filteredTxs]);
+
+  const totalCredit = useMemo(() => creditTxs.reduce((sum: number, t: any) => sum + (Number(t.amount) || 0), 0), [creditTxs]);
+  const totalDebit = useMemo(() => debitTxs.reduce((sum: number, t: any) => sum + (Number(t.amount) || 0), 0), [debitTxs]);
+  const netBalance = totalCredit - totalDebit;
+  const netMargin = totalCredit > 0 ? (netBalance / totalCredit) * 100 : 0;
+
+  const totalOrdersAmount = useMemo(() => filteredOrders.reduce((sum: number, o: any) => sum + (Number(o.total_amount) || 0), 0), [filteredOrders]);
+  const totalOrdersPaid = useMemo(() => filteredOrders.reduce((sum: number, o: any) => sum + (Number(o.paid_amount) || 0), 0), [filteredOrders]);
+  const totalOrdersRemaining = useMemo(() => filteredOrders.reduce((sum: number, o: any) => sum + (Number(o.remaining_amount) || 0), 0), [filteredOrders]);
+
+  // Category breakdown for Expenses / Debits
   const debitCategoryData = useMemo(() => {
-    const counts: any = {};
-    transactions.filter((t: any) => t.type === 'Debit').forEach((t: any) => {
-      counts[t.category] = (counts[t.category] || 0) + t.amount;
+    const map = new Map<string, { total: number; count: number }>();
+    debitTxs.forEach((t: any) => {
+      const amt = Number(t.amount) || 0;
+      if (amt <= 0) return;
+      const cat = t.category || 'General';
+      const cur = map.get(cat) || { total: 0, count: 0 };
+      map.set(cat, { total: cur.total + amt, count: cur.count + 1 });
     });
-    return Object.entries(counts).map(([name, value]) => ({ name, value }));
-  }, [transactions]);
+    return Array.from(map.entries())
+      .map(([name, data]) => ({
+        name,
+        value: data.total,
+        count: data.count,
+        percentage: totalDebit > 0 ? (data.total / totalDebit) * 100 : 0,
+      }))
+      .sort((a, b) => b.value - a.value);
+  }, [debitTxs, totalDebit]);
 
-  const paymentData = useMemo(() => {
-    const counts: any = {};
-    transactions.forEach((t: any) => {
-      counts[t.payment_type] = (counts[t.payment_type] || 0) + t.amount;
+  // Category breakdown for Income / Credits
+  const creditCategoryData = useMemo(() => {
+    const map = new Map<string, { total: number; count: number }>();
+    creditTxs.forEach((t: any) => {
+      const amt = Number(t.amount) || 0;
+      if (amt <= 0) return;
+      const cat = t.category || 'General';
+      const cur = map.get(cat) || { total: 0, count: 0 };
+      map.set(cat, { total: cur.total + amt, count: cur.count + 1 });
     });
-    return Object.entries(counts).map(([name, value]) => ({ name, value }));
-  }, [transactions]);
+    return Array.from(map.entries())
+      .map(([name, data]) => ({
+        name,
+        value: data.total,
+        count: data.count,
+        percentage: totalCredit > 0 ? (data.total / totalCredit) * 100 : 0,
+      }))
+      .sort((a, b) => b.value - a.value);
+  }, [creditTxs, totalCredit]);
+
+  // Payment Mode breakdown
+  const paymentModeData = useMemo(() => {
+    const map = new Map<string, { total: number; count: number }>();
+    let grandTotal = 0;
+    filteredTxs.forEach((t: any) => {
+      const amt = Number(t.amount) || 0;
+      if (amt <= 0) return;
+      grandTotal += amt;
+      const mode = t.payment_type || 'Cash';
+      const cur = map.get(mode) || { total: 0, count: 0 };
+      map.set(mode, { total: cur.total + amt, count: cur.count + 1 });
+    });
+    return Array.from(map.entries())
+      .map(([name, data]) => ({
+        name,
+        value: data.total,
+        count: data.count,
+        percentage: grandTotal > 0 ? (data.total / grandTotal) * 100 : 0,
+      }))
+      .sort((a, b) => b.value - a.value);
+  }, [filteredTxs]);
+
+  // Supplier breakdown from orders
+  const supplierData = useMemo(() => {
+    const map = new Map<string, { totalBilled: number; totalPaid: number; remaining: number; orderCount: number }>();
+    filteredOrders.forEach((o: any) => {
+      const sup = String(o.supplier || 'Unassigned').trim();
+      const billed = Number(o.total_amount) || 0;
+      const paid = Number(o.paid_amount) || 0;
+      const rem = Number(o.remaining_amount) || Math.max(0, billed - paid);
+      const cur = map.get(sup) || { totalBilled: 0, totalPaid: 0, remaining: 0, orderCount: 0 };
+      map.set(sup, {
+        totalBilled: cur.totalBilled + billed,
+        totalPaid: cur.totalPaid + paid,
+        remaining: cur.remaining + rem,
+        orderCount: cur.orderCount + 1,
+      });
+    });
+    return Array.from(map.entries())
+      .map(([supplier, d]) => ({
+        supplier,
+        ...d,
+      }))
+      .sort((a, b) => b.totalBilled - a.totalBilled);
+  }, [filteredOrders]);
+
+  // Daily Cash Flow Trend Data for Charts
+  const dailyCashFlowData = useMemo(() => {
+    const dayMap = new Map<string, { date: string; credit: number; debit: number }>();
+    const sorted = [...filteredTxs].sort((a: any, b: any) => a.date.localeCompare(b.date));
+
+    sorted.forEach((t: any) => {
+      try {
+        const dayKey = format(parseISO(t.date), 'dd MMM');
+        const cur = dayMap.get(dayKey) || { date: dayKey, credit: 0, debit: 0 };
+        const amt = Number(t.amount) || 0;
+        if (t.type === 'Credit') cur.credit += amt;
+        if (t.type === 'Debit') cur.debit += amt;
+        dayMap.set(dayKey, cur);
+      } catch {}
+    });
+
+    const items = Array.from(dayMap.values());
+    return items.slice(-15); // Show up to the last 15 active days for clean chart spacing
+  }, [filteredTxs]);
+
+  // Executive Spending Habits & Financial Health Analytics
+  const financialInsights = useMemo(() => {
+    const expenseRatio = totalCredit > 0 ? (totalDebit / totalCredit) * 100 : totalDebit > 0 ? 100 : 0;
+    
+    // Days in period
+    let days = 30;
+    if (startDate && endDate) {
+      try {
+        days = Math.max(1, differenceInCalendarDays(endDate, startDate) + 1);
+      } catch {
+        days = 30;
+      }
+    } else if (filteredTxs.length > 0) {
+      days = Math.max(1, filteredTxs.length);
+    }
+    const dailyAvgExpense = Math.round(totalDebit / days);
+    const dailyAvgIncome = Math.round(totalCredit / days);
+
+    // Payment mode split (Digital / NetBanking / UPI vs Cash)
+    let digitalTotal = 0;
+    let cashTotal = 0;
+    filteredTxs.forEach((t: any) => {
+      const amt = Number(t.amount) || 0;
+      const mode = String(t.payment_type || '').toLowerCase();
+      if (mode.includes('cash')) {
+        cashTotal += amt;
+      } else {
+        digitalTotal += amt;
+      }
+    });
+    const totalVolume = digitalTotal + cashTotal;
+    const digitalShare = totalVolume > 0 ? (digitalTotal / totalVolume) * 100 : 0;
+
+    return {
+      expenseRatio,
+      dailyAvgExpense,
+      dailyAvgIncome,
+      digitalShare,
+      cashShare: Math.max(0, 100 - digitalShare),
+      topExpense: debitCategoryData[0] || null,
+      topIncome: creditCategoryData[0] || null,
+    };
+  }, [totalCredit, totalDebit, startDate, endDate, filteredTxs, debitCategoryData, creditCategoryData]);
+
+  // Clean active shape for Donut chart in Reports
+  const renderReportActiveShape = useCallback((props: any) => {
+    const { cx, cy, innerRadius, outerRadius, startAngle, endAngle, fill } = props;
+    return (
+      <g>
+        <Sector
+          cx={cx}
+          cy={cy}
+          innerRadius={innerRadius - 2}
+          outerRadius={outerRadius + 5}
+          startAngle={startAngle}
+          endAngle={endAngle}
+          fill={fill}
+        />
+        <Sector
+          cx={cx}
+          cy={cy}
+          startAngle={startAngle}
+          endAngle={endAngle}
+          innerRadius={outerRadius + 7}
+          outerRadius={outerRadius + 9}
+          fill={fill}
+          opacity={0.35}
+        />
+      </g>
+    );
+  }, []);
+
+  // Filtered transactions for inline category drilldown
+  const getCategoryTransactions = useCallback((categoryName: string, type: 'Debit' | 'Credit') => {
+    return (filteredTxs || []).filter((t: any) => 
+      t.type === type && (t.category || 'General') === categoryName
+    ).sort((a: any, b: any) => b.date.localeCompare(a.date));
+  }, [filteredTxs]);
+
+  // --- Multi-Format Export Handlers ---
 
   const exportPDF = async () => {
     if (isExportingPdf) return;
@@ -6257,7 +6936,6 @@ function ReportsModule({ transactions, orders, showToast, onPreviewPdf }: any) {
       const doc = new jsPDF();
       (doc as any).autoTable = (options: any) => autoTable(doc, options);
 
-      // Attempt to load Nirmala.ttf safely without crashing if offline or missing
       const { fontName: activeFont, cur } = await setupDocFont(doc);
 
       const formatReportDate = (value: string) => {
@@ -6268,47 +6946,60 @@ function ReportsModule({ transactions, orders, showToast, onPreviewPdf }: any) {
         }
       };
 
-      const creditTotal = creditTxs.reduce((sum: number, tx: any) => sum + (Number(tx.amount) || 0), 0);
-      const debitTotal = debitTxs.reduce((sum: number, tx: any) => sum + (Number(tx.amount) || 0), 0);
-
-      // Branded report header
+      // Header Banner
       doc.setFillColor(24, 24, 27);
-      doc.roundedRect(10, 10, 190, 24, 4, 4, 'F');
+      doc.roundedRect(10, 10, 190, 26, 4, 4, 'F');
       doc.setTextColor(255, 255, 255);
       doc.setFont(activeFont);
       doc.setFontSize(16);
       doc.text('KhataBook Pro', 16, 20);
       doc.setFontSize(9);
       doc.setTextColor(212, 212, 216);
-      doc.text('Financial Transaction & Ledger Report', 16, 28);
+      doc.text(`Financial Performance Report  |  Period: ${periodLabel}`, 16, 28);
       doc.text(`Generated: ${format(new Date(), 'dd MMM yyyy, hh:mm a')}`, 125, 28);
 
-      // Quick summary boxes
+      // Executive Summary Metric Boxes
       doc.setFillColor(240, 253, 244);
-      doc.roundedRect(10, 39, 92, 17, 3, 3, 'F');
+      doc.roundedRect(10, 40, 58, 18, 3, 3, 'F');
       doc.setFillColor(254, 242, 242);
-      doc.roundedRect(108, 39, 92, 17, 3, 3, 'F');
-      
-      doc.setFont(activeFont);
-      doc.setFontSize(9.5);
-      doc.setTextColor(22, 101, 52);
-      doc.text(`Total Credit:  ${cur}${creditTotal.toLocaleString('en-IN')}`, 16, 50);
-      doc.setTextColor(185, 28, 28);
-      doc.text(`Total Debit:  ${cur}${debitTotal.toLocaleString('en-IN')}`, 114, 50);
+      doc.roundedRect(73, 40, 58, 18, 3, 3, 'F');
+      doc.setFillColor(netBalance >= 0 ? 239 : 254, netBalance >= 0 ? 246 : 242, netBalance >= 0 ? 255 : 242);
+      doc.roundedRect(136, 40, 64, 18, 3, 3, 'F');
 
-      const tableData = (transactions || []).map((t: any) => [
+      doc.setFont(activeFont);
+      doc.setFontSize(8);
+      doc.setTextColor(22, 101, 52);
+      doc.text('TOTAL INFLOW (CREDIT)', 15, 47);
+      doc.setFontSize(11);
+      doc.text(`${cur}${totalCredit.toLocaleString('en-IN')}`, 15, 54);
+
+      doc.setFontSize(8);
+      doc.setTextColor(185, 28, 28);
+      doc.text('TOTAL OUTFLOW (DEBIT)', 78, 47);
+      doc.setFontSize(11);
+      doc.text(`${cur}${totalDebit.toLocaleString('en-IN')}`, 78, 54);
+
+      doc.setFontSize(8);
+      doc.setTextColor(netBalance >= 0 ? 29 : 185, netBalance >= 0 ? 78 : 28, netBalance >= 0 ? 216 : 28);
+      doc.text(`NET SURPLUS (${netMargin.toFixed(1)}% MARGIN)`, 141, 47);
+      doc.setFontSize(11);
+      doc.text(`${cur}${netBalance.toLocaleString('en-IN')}`, 141, 54);
+
+      // Detailed Transactions Table
+      const tableData = (filteredTxs || []).map((t: any, idx: number) => [
+        idx + 1,
         formatReportDate(t.date),
         t.type || '-',
         t.category || '-',
         `${cur}${(Number(t.amount) || 0).toLocaleString('en-IN')}`,
-        t.payment_type || '-',
+        t.payment_type || 'Cash',
         t.description || '-'
       ]);
 
       autoTable(doc, {
-        head: [['Date', 'Type', 'Category', 'Amount', 'Payment', 'Description']],
-        body: tableData.length > 0 ? tableData : [['No records', '-', '-', '-', '-', '-']],
-        startY: 61,
+        head: [['#', 'Date & Time', 'Type', 'Category', 'Amount', 'Payment Mode', 'Description']],
+        body: tableData.length > 0 ? tableData : [['-', 'No transactions recorded in this period', '-', '-', '-', '-', '-']],
+        startY: 63,
         theme: 'grid',
         styles: {
           font: activeFont,
@@ -6329,22 +7020,49 @@ function ReportsModule({ transactions, orders, showToast, onPreviewPdf }: any) {
         },
         alternateRowStyles: { fillColor: [250, 250, 250] },
         columnStyles: {
-          0: { cellWidth: 32 },
-          1: { cellWidth: 17 },
-          2: { cellWidth: 30 },
-          3: { cellWidth: 24, halign: 'right' },
-          4: { cellWidth: 25 },
-          5: { cellWidth: 'auto' },
+          0: { cellWidth: 10, halign: 'center' },
+          1: { cellWidth: 32 },
+          2: { cellWidth: 16 },
+          3: { cellWidth: 26 },
+          4: { cellWidth: 24, halign: 'right' },
+          5: { cellWidth: 24 },
+          6: { cellWidth: 'auto' },
         },
         didDrawPage: (data) => {
           doc.setFont(activeFont);
           doc.setFontSize(8);
           doc.setTextColor(113, 113, 122);
-          doc.text(`Page ${data.pageNumber}`, 190, 288, { align: 'right' });
+          doc.text(`Page ${data.pageNumber}  |  KhataBook Pro Report`, 190, 288, { align: 'right' });
         },
       });
 
-      const filename = `KhataBook_Report_${format(new Date(), 'yyyyMMdd_HHmm')}.pdf`;
+      // Append Top Expense Categories summary if available
+      if (debitCategoryData.length > 0) {
+        const lastY = (doc as any).lastAutoTable ? (doc as any).lastAutoTable.finalY + 8 : 65;
+        if (lastY < 235) {
+          doc.setFont(activeFont);
+          doc.setFontSize(10);
+          doc.setTextColor(234, 88, 12);
+          doc.text('Expense Distribution by Category (Top Categories)', 10, lastY);
+          autoTable(doc, {
+            head: [['#', 'Category Name', 'Total Amount', '% Share', 'Txn Count']],
+            body: debitCategoryData.slice(0, 8).map((c, i) => [
+              i + 1,
+              c.name,
+              `${cur}${c.value.toLocaleString('en-IN')}`,
+              `${c.percentage.toFixed(1)}%`,
+              c.count
+            ]),
+            startY: lastY + 3,
+            theme: 'grid',
+            styles: { font: activeFont, fontSize: 8, cellPadding: 1.5 },
+            headStyles: { fillColor: [39, 39, 42], textColor: [255, 255, 255], fontStyle: 'bold' },
+            columnStyles: { 0: { cellWidth: 10, halign: 'center' }, 2: { halign: 'right' }, 3: { halign: 'right' }, 4: { halign: 'center' } }
+          });
+        }
+      }
+
+      const filename = `KhataBook_Report_${selectedPeriod}_${format(new Date(), 'yyyyMMdd_HHmm')}.pdf`;
       const pdfArrayBuffer = doc.output('arraybuffer');
       const pdfBlob = doc.output('blob');
       const dataUri = doc.output('datauristring');
@@ -6356,7 +7074,7 @@ function ReportsModule({ transactions, orders, showToast, onPreviewPdf }: any) {
           filename,
           base64Data: pdfBase64,
           rawArrayBuffer: pdfArrayBuffer,
-          title: 'KhataBook Business Report',
+          title: `KhataBook Report (${periodLabel})`,
         });
         return;
       }
@@ -6372,14 +7090,10 @@ function ReportsModule({ transactions, orders, showToast, onPreviewPdf }: any) {
         downloadBlobFallback(pdfBlob, filename);
       }
 
-      if (showToast) {
-        showToast('PDF report generated successfully!', 'success');
-      }
+      showToast?.('PDF report generated successfully!', 'success');
     } catch (error: any) {
       console.error('PDF export failed:', error);
-      if (showToast) {
-        showToast('Unable to export PDF. Please check data and try again.', 'error');
-      }
+      showToast?.('Unable to export PDF. Please check data and try again.', 'error');
     } finally {
       setIsExportingPdf(false);
     }
@@ -6390,14 +7104,33 @@ function ReportsModule({ transactions, orders, showToast, onPreviewPdf }: any) {
     setIsExportingExcel(true);
 
     try {
-      const formattedRows = (transactions || []).map((t: any, index: number) => {
+      const wb = XLSX.utils.book_new();
+
+      // Sheet 1: Executive Financial Summary & KPIs
+      const summaryRows = [
+        { 'Metric': 'Report Period', 'Value': periodLabel },
+        { 'Metric': 'Generated At', 'Value': format(new Date(), 'yyyy-MM-dd HH:mm:ss') },
+        { 'Metric': 'Total Inflow (Credit INR)', 'Value': totalCredit },
+        { 'Metric': 'Total Outflow (Debit INR)', 'Value': totalDebit },
+        { 'Metric': 'Net Surplus (INR)', 'Value': netBalance },
+        { 'Metric': 'Net Profit Margin (%)', 'Value': Number(netMargin.toFixed(2)) },
+        { 'Metric': 'Total Transactions Analyzed', 'Value': filteredTxs.length },
+        { 'Metric': 'Supplier Orders Total (INR)', 'Value': totalOrdersAmount },
+        { 'Metric': 'Supplier Orders Paid (INR)', 'Value': totalOrdersPaid },
+        { 'Metric': 'Outstanding Supplier Payables (INR)', 'Value': totalOrdersRemaining },
+      ];
+      const wsSummary = XLSX.utils.json_to_sheet(summaryRows);
+      wsSummary['!cols'] = [{ wch: 32 }, { wch: 28 }];
+      XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
+
+      // Sheet 2: Transactions Detail
+      const txRows = (filteredTxs || []).map((t: any, index: number) => {
         let displayDate = t.date;
         try {
           displayDate = format(parseISO(t.date), 'yyyy-MM-dd HH:mm');
         } catch {
           displayDate = t.date || '';
         }
-
         return {
           'S.No': index + 1,
           'Date & Time': displayDate,
@@ -6410,31 +7143,94 @@ function ReportsModule({ transactions, orders, showToast, onPreviewPdf }: any) {
           'Order ID': t.order_id || '',
         };
       });
-
-      const ws = XLSX.utils.json_to_sheet(
-        formattedRows.length > 0 
-          ? formattedRows 
-          : [{ 'Message': 'No transactions recorded' }]
+      const wsTx = XLSX.utils.json_to_sheet(
+        txRows.length > 0 ? txRows : [{ 'Message': 'No transactions in this period' }]
       );
-
-      // Auto-size worksheet columns for neat layout
-      const colWidths = [
-        { wch: 6 },  // S.No
-        { wch: 18 }, // Date
-        { wch: 10 }, // Type
-        { wch: 20 }, // Category
-        { wch: 14 }, // Amount
-        { wch: 16 }, // Payment Mode
-        { wch: 30 }, // Description
-        { wch: 16 }, // Reference
-        { wch: 16 }, // Order ID
+      wsTx['!cols'] = [
+        { wch: 6 },
+        { wch: 18 },
+        { wch: 10 },
+        { wch: 20 },
+        { wch: 14 },
+        { wch: 16 },
+        { wch: 30 },
+        { wch: 16 },
+        { wch: 16 },
       ];
-      ws['!cols'] = colWidths;
+      XLSX.utils.book_append_sheet(wb, wsTx, 'Transactions');
 
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, "Transactions");
+      // Sheet 3: Supplier Orders & Bills Detail
+      const orderRows = (filteredOrders || []).map((o: any, index: number) => {
+        let displayDate = o.date;
+        try {
+          displayDate = format(parseISO(o.date), 'yyyy-MM-dd');
+        } catch {
+          displayDate = o.date || '';
+        }
+        return {
+          'S.No': index + 1,
+          'Order ID': o.order_id || '',
+          'Supplier': o.supplier || '',
+          'Date': displayDate,
+          'Total Amount (INR)': Number(o.total_amount) || 0,
+          'Paid Amount (INR)': Number(o.paid_amount) || 0,
+          'Remaining (INR)': Number(o.remaining_amount) || 0,
+          'Status': o.status || '',
+          'Items Count': Array.isArray(o.items) ? o.items.length : 1,
+        };
+      });
+      const wsOrders = XLSX.utils.json_to_sheet(
+        orderRows.length > 0 ? orderRows : [{ 'Message': 'No orders in this period' }]
+      );
+      wsOrders['!cols'] = [
+        { wch: 6 },
+        { wch: 16 },
+        { wch: 24 },
+        { wch: 14 },
+        { wch: 18 },
+        { wch: 18 },
+        { wch: 18 },
+        { wch: 14 },
+        { wch: 12 },
+      ];
+      XLSX.utils.book_append_sheet(wb, wsOrders, 'Supplier Orders');
 
-      const filename = `KhataBook_Report_${format(new Date(), 'yyyyMMdd_HHmm')}.xlsx`;
+      // Sheet 4: Category Breakdown (Ranked Expenses & Incomes)
+      const catSummaryRows = [
+        ...debitCategoryData.map((c, i) => ({
+          'S.No': i + 1,
+          'Type': 'Expense (Debit)',
+          'Category': c.name,
+          'Total Amount (INR)': c.value,
+          'Share of Outflow (%)': Number(c.percentage.toFixed(2)),
+          'Txn Count': c.count,
+          'Avg Per Txn (INR)': c.count > 0 ? Math.round(c.value / c.count) : 0,
+        })),
+        ...creditCategoryData.map((c, i) => ({
+          'S.No': i + 1,
+          'Type': 'Income (Credit)',
+          'Category': c.name,
+          'Total Amount (INR)': c.value,
+          'Share of Inflow (%)': Number(c.percentage.toFixed(2)),
+          'Txn Count': c.count,
+          'Avg Per Txn (INR)': c.count > 0 ? Math.round(c.value / c.count) : 0,
+        })),
+      ];
+      const wsCats = XLSX.utils.json_to_sheet(
+        catSummaryRows.length > 0 ? catSummaryRows : [{ 'Message': 'No category records in this period' }]
+      );
+      wsCats['!cols'] = [
+        { wch: 6 },
+        { wch: 18 },
+        { wch: 22 },
+        { wch: 18 },
+        { wch: 22 },
+        { wch: 14 },
+        { wch: 18 },
+      ];
+      XLSX.utils.book_append_sheet(wb, wsCats, 'Category Breakdown');
+
+      const filename = `KhataBook_Report_${selectedPeriod}_${format(new Date(), 'yyyyMMdd_HHmm')}.xlsx`;
       const excelBase64 = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
       const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
 
@@ -6452,16 +7248,52 @@ function ReportsModule({ transactions, orders, showToast, onPreviewPdf }: any) {
         downloadBlobFallback(excelBlob, filename);
       }
 
-      if (showToast) {
-        showToast('Excel report generated successfully!', 'success');
-      }
+      showToast?.('Comprehensive 4-sheet Excel workbook exported successfully!', 'success');
     } catch (error: any) {
       console.error('Excel export failed:', error);
-      if (showToast) {
-        showToast('Unable to export Excel file. Please try again.', 'error');
-      }
+      showToast?.('Unable to export Excel file. Please try again.', 'error');
     } finally {
       setIsExportingExcel(false);
+    }
+  };
+
+  const copyWhatsAppSummary = async () => {
+    setIsCopyingSummary(true);
+    try {
+      const topCategoriesFormatted = debitCategoryData.slice(0, 3).map((c, i) => 
+        `  ${i + 1}. ${c.name}: ₹${c.value.toLocaleString('en-IN')} (${c.percentage.toFixed(0)}%)`
+      ).join('\n');
+
+      const summaryText = [
+        `📊 *KhataBook Business & Financial Summary*`,
+        `🗓️ *Period:* ${periodLabel}`,
+        `━━━━━━━━━━━━━━━━━━━`,
+        `💰 *Total Inflow (Credit):* ₹${totalCredit.toLocaleString('en-IN')} (${creditTxs.length} receipts)`,
+        `💸 *Total Outflow (Debit):* ₹${totalDebit.toLocaleString('en-IN')} (${debitTxs.length} payouts)`,
+        `📈 *Net Surplus:* ${netBalance >= 0 ? '+' : '-'}₹${Math.abs(netBalance).toLocaleString('en-IN')} (${netMargin.toFixed(1)}% margin)`,
+        `📦 *Supplier Bills:* ₹${totalOrdersAmount.toLocaleString('en-IN')} (Paid: ₹${totalOrdersPaid.toLocaleString('en-IN')} | Pending: ₹${totalOrdersRemaining.toLocaleString('en-IN')})`,
+        `━━━━━━━━━━━━━━━━━━━`,
+        `🏷️ *Top Expense Categories:*`,
+        topCategoriesFormatted || '  None recorded',
+        `━━━━━━━━━━━━━━━━━━━`,
+        `💡 *Habit Analytics:*`,
+        `  • Daily Avg Expense: ₹${financialInsights.dailyAvgExpense.toLocaleString('en-IN')}/day`,
+        `  • Digital Adoption: ${financialInsights.digitalShare.toFixed(1)}% UPI/Bank`,
+        `  • Cash Outflow: ${financialInsights.cashShare.toFixed(1)}% Cash`,
+        `━━━━━━━━━━━━━━━━━━━`,
+        `_Generated from KhataBook Pro on ${format(new Date(), 'dd MMM yyyy, hh:mm a')}_`,
+      ].join('\n');
+
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(summaryText);
+        showToast?.('Financial summary copied to clipboard! Ready to paste into WhatsApp.', 'success');
+      } else {
+        showToast?.('Clipboard copy not supported on this browser', 'info');
+      }
+    } catch (err: any) {
+      showToast?.('Could not copy report text', 'error');
+    } finally {
+      setIsCopyingSummary(false);
     }
   };
 
@@ -6469,90 +7301,956 @@ function ReportsModule({ transactions, orders, showToast, onPreviewPdf }: any) {
     <motion.div 
       initial={{ opacity: 0, x: 20 }}
       animate={{ opacity: 1, x: 0 }}
-      className="space-y-8"
+      className="space-y-6"
     >
-      <div className="flex gap-4">
-        <button 
-          onClick={exportPDF} 
-          disabled={isExportingPdf}
-          className="flex-1 bg-zinc-900 hover:bg-zinc-800 active:scale-98 border border-zinc-800 p-4 rounded-2xl flex items-center justify-center gap-2 font-bold text-sm transition-all disabled:opacity-50"
-        >
-          {isExportingPdf ? (
-            <RefreshCw className="w-4 h-4 text-red-500 animate-spin" />
-          ) : (
-            <Download className="w-4 h-4 text-red-500" />
-          )}
-          {isExportingPdf ? 'Exporting PDF...' : 'Export PDF'}
-        </button>
-        <button 
-          onClick={exportExcel} 
-          disabled={isExportingExcel}
-          className="flex-1 bg-zinc-900 hover:bg-zinc-800 active:scale-98 border border-zinc-800 p-4 rounded-2xl flex items-center justify-center gap-2 font-bold text-sm transition-all disabled:opacity-50"
-        >
-          {isExportingExcel ? (
-            <RefreshCw className="w-4 h-4 text-green-500 animate-spin" />
-          ) : (
-            <Download className="w-4 h-4 text-green-500" />
-          )}
-          {isExportingExcel ? 'Exporting Excel...' : 'Export Excel'}
-        </button>
-      </div>
-
-      <div className="bg-zinc-900 border border-zinc-800 rounded-[32px] p-6">
-        <h3 className="font-bold mb-6 flex items-center gap-2"><ArrowUpRight className="text-green-500" /> Credit Breakdown</h3>
-        <div className="h-56 sm:h-64">
-          <ResponsiveContainer width="100%" height="100%">
-            <PieChart>
-              <Pie
-                data={creditCategoryData}
-                cx="50%"
-                cy="50%"
-                innerRadius={60}
-                outerRadius={80}
-                paddingAngle={5}
-                dataKey="value"
-              >
-                {creditCategoryData.map((_entry: any, index: number) => (
-                  <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                ))}
-              </Pie>
-              <Tooltip />
-            </PieChart>
-          </ResponsiveContainer>
-        </div>
-        <div className="mt-3 max-h-32 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2">
-          {creditCategoryData.map((entry: any, index: number) => (
-            <div key={`credit-legend-${entry.name}-${index}`} className="flex items-center gap-2 min-w-0 text-xs text-zinc-400">
-              <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
-              <span className="truncate" title={entry.name}>{entry.name}</span>
+      {/* Top Header Card: Title, Date Filter Presets, and Export Actions */}
+      <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-5 sm:p-6 space-y-5">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <div className="w-9 h-9 rounded-2xl bg-orange-500/10 border border-orange-500/25 flex items-center justify-center text-orange-400">
+                <FileText className="w-5 h-5" />
+              </div>
+              <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-white">Financial & Business Reports</h2>
             </div>
-          ))}
+            <p className="text-xs text-zinc-400">
+              Interactive financial intelligence, category distributions, and multi-format exports.
+            </p>
+          </div>
+
+          {/* Quick Action Export Buttons */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <button 
+              type="button"
+              onClick={exportPDF} 
+              disabled={isExportingPdf}
+              className="px-3.5 py-2.5 bg-zinc-850 hover:bg-zinc-800 active:scale-95 border border-zinc-700/80 rounded-2xl flex items-center gap-2 font-bold text-xs text-white transition-all shadow-sm disabled:opacity-50 cursor-pointer"
+              title="Generate printable PDF statement with preview"
+            >
+              {isExportingPdf ? (
+                <RefreshCw className="w-4 h-4 text-orange-400 animate-spin" />
+              ) : (
+                <Download className="w-4 h-4 text-orange-400" />
+              )}
+              <span>{isExportingPdf ? 'Exporting...' : 'PDF Report'}</span>
+            </button>
+
+            <button 
+              type="button"
+              onClick={exportExcel} 
+              disabled={isExportingExcel}
+              className="px-3.5 py-2.5 bg-zinc-850 hover:bg-zinc-800 active:scale-95 border border-zinc-700/80 rounded-2xl flex items-center gap-2 font-bold text-xs text-white transition-all shadow-sm disabled:opacity-50 cursor-pointer"
+              title="Export complete 3-sheet Excel spreadsheet"
+            >
+              {isExportingExcel ? (
+                <RefreshCw className="w-4 h-4 text-green-400 animate-spin" />
+              ) : (
+                <Download className="w-4 h-4 text-green-400" />
+              )}
+              <span>{isExportingExcel ? 'Exporting...' : 'Excel Workbook'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={copyWhatsAppSummary}
+              disabled={isCopyingSummary}
+              className="px-3.5 py-2.5 bg-zinc-850 hover:bg-zinc-800 active:scale-95 border border-zinc-700/80 rounded-2xl flex items-center gap-2 font-bold text-xs text-zinc-300 hover:text-white transition-all shadow-sm cursor-pointer"
+              title="Copy formatted summary to share on WhatsApp or SMS"
+            >
+              <Copy className="w-4 h-4 text-blue-400" />
+              <span className="hidden sm:inline">WhatsApp Summary</span>
+              <span className="sm:hidden">Share</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Date Filter Segmented Presets */}
+        <div className="pt-2 border-t border-zinc-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-1.5 p-1 bg-zinc-950/80 rounded-2xl border border-zinc-800/80 overflow-x-auto text-[11px] no-scrollbar">
+            <button
+              type="button"
+              onClick={() => setSelectedPeriod('this_week')}
+              className={`px-3 py-1.5 rounded-xl font-semibold transition-all shrink-0 cursor-pointer ${
+                selectedPeriod === 'this_week'
+                  ? 'bg-orange-500 text-white shadow-xs'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              Week
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedPeriod('this_month')}
+              className={`px-3 py-1.5 rounded-xl font-semibold transition-all shrink-0 cursor-pointer ${
+                selectedPeriod === 'this_month'
+                  ? 'bg-orange-500 text-white shadow-xs'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              This Month
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedPeriod('last_month')}
+              className={`px-3 py-1.5 rounded-xl font-semibold transition-all shrink-0 cursor-pointer ${
+                selectedPeriod === 'last_month'
+                  ? 'bg-orange-500 text-white shadow-xs'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              Last Month
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedPeriod('last_30_days')}
+              className={`px-3 py-1.5 rounded-xl font-semibold transition-all shrink-0 cursor-pointer ${
+                selectedPeriod === 'last_30_days'
+                  ? 'bg-orange-500 text-white shadow-xs'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              30 Days
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedPeriod('this_quarter')}
+              className={`px-3 py-1.5 rounded-xl font-semibold transition-all shrink-0 cursor-pointer ${
+                selectedPeriod === 'this_quarter'
+                  ? 'bg-orange-500 text-white shadow-xs'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              Quarter
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedPeriod('this_year')}
+              className={`px-3 py-1.5 rounded-xl font-semibold transition-all shrink-0 cursor-pointer ${
+                selectedPeriod === 'this_year'
+                  ? 'bg-orange-500 text-white shadow-xs'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              Year (YTD)
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedPeriod('all')}
+              className={`px-3 py-1.5 rounded-xl font-semibold transition-all shrink-0 cursor-pointer ${
+                selectedPeriod === 'all'
+                  ? 'bg-orange-500 text-white shadow-xs'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              All Time
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedPeriod('custom')}
+              className={`px-3 py-1.5 rounded-xl font-semibold transition-all shrink-0 cursor-pointer ${
+                selectedPeriod === 'custom'
+                  ? 'bg-orange-500 text-white shadow-xs'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              Custom
+            </button>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 text-xs text-zinc-400">
+              <Calendar className="w-3.5 h-3.5 text-orange-400 shrink-0" />
+              <span className="font-medium text-white truncate max-w-[200px]">{periodLabel}</span>
+              <span className="text-zinc-600 font-mono">({filteredTxs.length} txns)</span>
+            </div>
+            {/* Quick Report Search */}
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                placeholder="Search report..."
+                value={reportSearchQuery}
+                onChange={(e) => setReportSearchQuery(e.target.value)}
+                className="pl-8 pr-2.5 py-1 text-xs rounded-xl bg-zinc-950/80 border border-zinc-800 text-white focus:outline-none focus:border-orange-500 w-32 sm:w-40 transition-all placeholder:text-zinc-600"
+              />
+              {reportSearchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setReportSearchQuery('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white text-xs"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Custom Date Range Pickers (shown only when 'custom' is active) */}
+        {selectedPeriod === 'custom' && (
+          <div className="p-3.5 rounded-2xl bg-zinc-950/60 border border-zinc-800/80 flex flex-col sm:flex-row items-center gap-3">
+            <span className="text-xs text-zinc-400 font-medium">Select Range:</span>
+            <div className="flex items-center gap-2 w-full sm:w-auto">
+              <input
+                type="date"
+                value={customStart}
+                onChange={(e) => setCustomStart(e.target.value)}
+                className="bg-zinc-900 border border-zinc-700/80 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none focus:border-orange-500 font-mono"
+              />
+              <span className="text-zinc-500 text-xs">to</span>
+              <input
+                type="date"
+                value={customEnd}
+                onChange={(e) => setCustomEnd(e.target.value)}
+                className="bg-zinc-900 border border-zinc-700/80 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none focus:border-orange-500 font-mono"
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Executive Financial Summary Grid */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+        {/* Total Inflow */}
+        <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-4 sm:p-5 space-y-2">
+          <div className="flex items-center justify-between text-zinc-400 text-xs font-semibold uppercase tracking-wider">
+            <span>Total Inflow</span>
+            <div className="p-1.5 rounded-xl bg-emerald-500/10 text-emerald-400">
+              <ArrowUpRight className="w-4 h-4" />
+            </div>
+          </div>
+          <p className="text-xl sm:text-2xl font-black text-emerald-400 font-mono tracking-tight">
+            ₹{totalCredit.toLocaleString('en-IN')}
+          </p>
+          <p className="text-[11px] text-zinc-500">
+            {creditTxs.length} receipts · Avg: ₹{creditTxs.length ? Math.round(totalCredit / creditTxs.length).toLocaleString('en-IN') : 0}
+          </p>
+        </div>
+
+        {/* Total Outflow */}
+        <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-4 sm:p-5 space-y-2">
+          <div className="flex items-center justify-between text-zinc-400 text-xs font-semibold uppercase tracking-wider">
+            <span>Total Outflow</span>
+            <div className="p-1.5 rounded-xl bg-rose-500/10 text-rose-400">
+              <ArrowDownLeft className="w-4 h-4" />
+            </div>
+          </div>
+          <p className="text-xl sm:text-2xl font-black text-rose-400 font-mono tracking-tight">
+            ₹{totalDebit.toLocaleString('en-IN')}
+          </p>
+          <p className="text-[11px] text-zinc-500">
+            {debitTxs.length} payouts · Avg: ₹{debitTxs.length ? Math.round(totalDebit / debitTxs.length).toLocaleString('en-IN') : 0}
+          </p>
+        </div>
+
+        {/* Net Surplus / Margin */}
+        <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-4 sm:p-5 space-y-2">
+          <div className="flex items-center justify-between text-zinc-400 text-xs font-semibold uppercase tracking-wider">
+            <span>Net Surplus</span>
+            <div className={`p-1.5 rounded-xl ${netBalance >= 0 ? 'bg-blue-500/10 text-blue-400' : 'bg-amber-500/10 text-amber-400'}`}>
+              <Wallet className="w-4 h-4" />
+            </div>
+          </div>
+          <p className={`text-xl sm:text-2xl font-black font-mono tracking-tight ${netBalance >= 0 ? 'text-white' : 'text-amber-400'}`}>
+            {netBalance >= 0 ? '+' : '-'}₹{Math.abs(netBalance).toLocaleString('en-IN')}
+          </p>
+          <p className="text-[11px] text-zinc-500">
+            {netMargin >= 0 ? 'Surplus margin' : 'Deficit'}: <span className={netMargin >= 0 ? 'text-emerald-400' : 'text-amber-400'}>{netMargin.toFixed(1)}%</span>
+          </p>
+        </div>
+
+        {/* Supplier Dues */}
+        <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-4 sm:p-5 space-y-2">
+          <div className="flex items-center justify-between text-zinc-400 text-xs font-semibold uppercase tracking-wider">
+            <span>Supplier Dues</span>
+            <div className="p-1.5 rounded-xl bg-orange-500/10 text-orange-400">
+              <Package className="w-4 h-4" />
+            </div>
+          </div>
+          <p className="text-xl sm:text-2xl font-black text-orange-400 font-mono tracking-tight">
+            ₹{totalOrdersRemaining.toLocaleString('en-IN')}
+          </p>
+          <p className="text-[11px] text-zinc-500">
+            Billed: ₹{totalOrdersAmount.toLocaleString('en-IN')} · Paid: ₹{totalOrdersPaid.toLocaleString('en-IN')}
+          </p>
         </div>
       </div>
 
-      <div className="bg-zinc-900 border border-zinc-800 rounded-[32px] p-6">
-        <h3 className="font-bold mb-6 flex items-center gap-2"><ArrowDownLeft className="text-red-500" /> Debit Breakdown</h3>
-        <div className="h-80 sm:h-64">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={debitCategoryData} margin={{ top: 8, right: 8, left: 0, bottom: 55 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
-              <XAxis
-                dataKey="name"
-                stroke="#71717a"
-                fontSize={10}
-                angle={-45}
-                textAnchor="end"
-                interval={0}
-                height={70}
-                tickFormatter={(value: string) => value.length > 14 ? `${value.slice(0, 14)}…` : value}
-              />
-              <YAxis stroke="#71717a" fontSize={10} />
-              <Tooltip contentStyle={{ backgroundColor: '#18181b', border: 'none', borderRadius: '12px' }} />
-              <Bar dataKey="value" fill="#f97316" radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
+      {/* Report Sub-Tabs Navigation */}
+      <div className="flex items-center gap-1.5 p-1 bg-zinc-950/80 rounded-2xl border border-zinc-800 overflow-x-auto no-scrollbar">
+        {[
+          { id: 'overview', label: 'Cash Flow Trend', icon: BarChart3 },
+          { id: 'expenses', label: 'Expense Distribution', icon: PieChartIcon },
+          { id: 'income', label: 'Income Sources', icon: ArrowUpRight },
+          { id: 'payments', label: 'Payment Modes', icon: CreditCard },
+          { id: 'suppliers', label: 'Supplier Ledger', icon: Package },
+        ].map((tab) => {
+          const Icon = tab.icon;
+          const isActive = activeReportTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveReportTab(tab.id as any)}
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all shrink-0 cursor-pointer ${
+                isActive
+                  ? 'bg-zinc-850 text-white shadow-xs border border-zinc-700/70'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
+              }`}
+            >
+              <Icon className={`w-3.5 h-3.5 ${isActive ? 'text-orange-400' : 'text-zinc-500'}`} />
+              <span>{tab.label}</span>
+            </button>
+          );
+        })}
       </div>
+
+      {/* --- TAB 1: CASH FLOW OVERVIEW & DAILY TREND --- */}
+      {activeReportTab === 'overview' && (
+        <div className="space-y-6">
+          {/* Executive Spending Habits & Financial Health Card */}
+          <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-5 sm:p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-orange-500/10 border border-orange-500/20 flex items-center justify-center text-orange-400">
+                  <Sparkles className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-base text-white">Financial Health & Spending Habits</h3>
+                  <p className="text-zinc-500 text-xs">Real-time performance benchmarks for {periodLabel}</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {/* Metric 1: Operating Expense Ratio */}
+              <div className="p-3.5 rounded-2xl bg-zinc-950/60 border border-zinc-800/80 space-y-1.5">
+                <div className="flex items-center justify-between text-[11px] text-zinc-400 font-medium">
+                  <span>Operating Ratio</span>
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
+                    financialInsights.expenseRatio <= 70 
+                      ? 'bg-emerald-500/10 text-emerald-400' 
+                      : financialInsights.expenseRatio <= 95 
+                      ? 'bg-amber-500/10 text-amber-400' 
+                      : 'bg-rose-500/10 text-rose-400'
+                  }`}>
+                    {financialInsights.expenseRatio <= 70 ? 'Healthy' : financialInsights.expenseRatio <= 95 ? 'Moderate' : 'High Burn'}
+                  </span>
+                </div>
+                <p className="text-lg font-black text-white font-mono">
+                  {financialInsights.expenseRatio.toFixed(1)}%
+                </p>
+                <p className="text-[10px] text-zinc-500">Outflow vs Total Inflow</p>
+              </div>
+
+              {/* Metric 2: Daily Outflow Burn */}
+              <div className="p-3.5 rounded-2xl bg-zinc-950/60 border border-zinc-800/80 space-y-1.5">
+                <div className="flex items-center justify-between text-[11px] text-zinc-400 font-medium">
+                  <span>Daily Avg Outflow</span>
+                  <span className="text-orange-400 text-xs font-mono">₹/day</span>
+                </div>
+                <p className="text-lg font-black text-white font-mono">
+                  ₹{financialInsights.dailyAvgExpense.toLocaleString('en-IN')}
+                </p>
+                <p className="text-[10px] text-zinc-500">Based on period activity</p>
+              </div>
+
+              {/* Metric 3: Digital vs Cash Ratio */}
+              <div className="p-3.5 rounded-2xl bg-zinc-950/60 border border-zinc-800/80 space-y-1.5">
+                <div className="flex items-center justify-between text-[11px] text-zinc-400 font-medium">
+                  <span>Payment Channels</span>
+                  <span className="text-blue-400 text-[10px] font-bold">{financialInsights.digitalShare.toFixed(0)}% Digital</span>
+                </div>
+                <p className="text-sm font-bold text-white">
+                  {financialInsights.digitalShare.toFixed(0)}% Online <span className="text-zinc-500 font-normal">/</span> {financialInsights.cashShare.toFixed(0)}% Cash
+                </p>
+                <div className="w-full bg-zinc-800 rounded-full h-1.5 overflow-hidden flex">
+                  <div className="bg-blue-500 h-full" style={{ width: `${financialInsights.digitalShare}%` }} />
+                  <div className="bg-amber-500 h-full" style={{ width: `${financialInsights.cashShare}%` }} />
+                </div>
+              </div>
+
+              {/* Metric 4: Top Outflow Driver */}
+              <div className="p-3.5 rounded-2xl bg-zinc-950/60 border border-zinc-800/80 space-y-1.5">
+                <div className="flex items-center justify-between text-[11px] text-zinc-400 font-medium">
+                  <span>Primary Cost Driver</span>
+                  <span className="text-orange-400 text-[10px] font-bold">
+                    {financialInsights.topExpense ? `${financialInsights.topExpense.percentage.toFixed(0)}%` : '0%'}
+                  </span>
+                </div>
+                <p className="text-sm font-bold text-orange-400 truncate">
+                  {financialInsights.topExpense?.name || 'None'}
+                </p>
+                <p className="text-[10px] text-zinc-500 font-mono">
+                  ₹{financialInsights.topExpense ? financialInsights.topExpense.value.toLocaleString('en-IN') : '0'}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-4">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div>
+                <h3 className="font-bold text-base sm:text-lg text-white">Daily Cash Flow Comparison</h3>
+                <p className="text-zinc-500 text-xs">Inflow (Credit) vs Outflow (Debit) activity over time</p>
+              </div>
+              <div className="flex items-center gap-4 text-xs font-semibold">
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
+                  <span className="text-emerald-400">Inflow</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-orange-500" />
+                  <span className="text-orange-400">Outflow</span>
+                </div>
+              </div>
+            </div>
+
+            {dailyCashFlowData.length === 0 ? (
+              <div className="p-12 text-center text-zinc-500 text-xs">
+                No transactions recorded for the selected date range.
+              </div>
+            ) : (
+              <div className="h-64 sm:h-72 w-full pt-2">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={dailyCashFlowData} margin={{ top: 10, right: 10, left: -10, bottom: 25 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+                    <XAxis 
+                      dataKey="date" 
+                      stroke="#71717a" 
+                      fontSize={10} 
+                      angle={-30} 
+                      textAnchor="end"
+                      height={40}
+                    />
+                    <YAxis 
+                      stroke="#71717a" 
+                      fontSize={10} 
+                      tickFormatter={(val) => val >= 1000 ? `${(val / 1000).toFixed(0)}k` : val}
+                    />
+                    <Tooltip 
+                      contentStyle={{ backgroundColor: '#18181b', border: '1px solid #27272a', borderRadius: '12px', fontSize: '12px' }}
+                      formatter={(value: any) => [`₹${Number(value).toLocaleString('en-IN')}`, '']}
+                    />
+                    <Bar dataKey="credit" name="Inflow" fill="#10b981" radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="debit" name="Outflow" fill="#f97316" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* --- TAB 2: EXPENSES DISTRIBUTION (DONUT + RANKED TABLE + DRILLDOWN) --- */}
+      {activeReportTab === 'expenses' && (
+        <div className="space-y-6">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <h3 className="font-bold text-base sm:text-lg text-white">Expense Distribution by Category</h3>
+                <p className="text-zinc-500 text-xs">
+                  Total Outflow: ₹{totalDebit.toLocaleString('en-IN')} across {debitCategoryData.length} categories
+                </p>
+              </div>
+              {expandedCategory && (
+                <button
+                  type="button"
+                  onClick={() => setExpandedCategory(null)}
+                  className="text-xs text-orange-400 hover:text-orange-300 font-semibold self-start sm:self-auto cursor-pointer"
+                >
+                  Collapse Details
+                </button>
+              )}
+            </div>
+
+            {debitCategoryData.length === 0 ? (
+              <div className="p-12 text-center text-zinc-500 text-xs">No expense transactions recorded in this period.</div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-8 items-start">
+                {/* Donut Chart with Active Sector & Center Callout */}
+                <div className="md:col-span-5 flex items-center justify-center sticky top-4">
+                  <div className="w-56 h-56 relative">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie
+                          data={debitCategoryData}
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={58}
+                          outerRadius={82}
+                          paddingAngle={3}
+                          dataKey="value"
+                          stroke="#18181b"
+                          strokeWidth={2}
+                          activeIndex={activeExpenseCatIndex !== null ? activeExpenseCatIndex : undefined}
+                          activeShape={renderReportActiveShape}
+                          onMouseEnter={(_, index) => setActiveExpenseCatIndex(index)}
+                          onMouseLeave={() => setActiveExpenseCatIndex(null)}
+                          onClick={(_, index) => {
+                            setActiveExpenseCatIndex(prev => prev === index ? null : index);
+                            const cat = debitCategoryData[index];
+                            if (cat) {
+                              setExpandedCategory(prev => prev === cat.name ? null : cat.name);
+                            }
+                          }}
+                        >
+                          {debitCategoryData.map((_entry, index) => (
+                            <Cell key={`rep-exp-cell-${index}`} fill={EXPENSE_PALETTE[index % EXPENSE_PALETTE.length]} />
+                          ))}
+                        </Pie>
+                        <Tooltip
+                          content={({ active, payload }) => {
+                            if (active && payload && payload.length) {
+                              const d = payload[0].payload;
+                              const fillColor = payload[0].payload.fill || payload[0].color || '#f97316';
+                              return (
+                                <div className="bg-zinc-950/95 border border-zinc-800 p-2.5 rounded-xl shadow-xl text-xs backdrop-blur-md z-50">
+                                  <div className="flex items-center gap-2 mb-1">
+                                    <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: fillColor }} />
+                                    <span className="font-bold text-white">{d.name}</span>
+                                  </div>
+                                  <div className="text-orange-400 font-mono font-semibold">
+                                    ₹{d.value.toLocaleString('en-IN')} ({d.percentage.toFixed(1)}%)
+                                  </div>
+                                  <div className="text-[10px] text-zinc-500 mt-0.5">{d.count} transaction{d.count === 1 ? '' : 's'}</div>
+                                </div>
+                              );
+                            }
+                            return null;
+                          }}
+                        />
+                      </PieChart>
+                    </ResponsiveContainer>
+
+                    {/* Dynamic Center Metric Callout */}
+                    <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none text-center p-2 transition-all">
+                      {activeExpenseCatIndex !== null && debitCategoryData[activeExpenseCatIndex] ? (
+                        <>
+                          <span 
+                            className="text-[10px] uppercase font-bold tracking-wider truncate max-w-[130px] px-2 py-0.5 rounded-full border mb-0.5"
+                            style={{ 
+                              color: EXPENSE_PALETTE[activeExpenseCatIndex % EXPENSE_PALETTE.length],
+                              borderColor: `${EXPENSE_PALETTE[activeExpenseCatIndex % EXPENSE_PALETTE.length]}40`,
+                              backgroundColor: `${EXPENSE_PALETTE[activeExpenseCatIndex % EXPENSE_PALETTE.length]}18`
+                            }}
+                          >
+                            {debitCategoryData[activeExpenseCatIndex].name}
+                          </span>
+                          <span className="text-base sm:text-lg font-black text-white font-mono tracking-tight">
+                            ₹{debitCategoryData[activeExpenseCatIndex].value >= 100000 
+                              ? (debitCategoryData[activeExpenseCatIndex].value / 100000).toFixed(2) + 'L' 
+                              : debitCategoryData[activeExpenseCatIndex].value.toLocaleString('en-IN')}
+                          </span>
+                          <span className="text-[10px] text-zinc-300 font-medium">
+                            {debitCategoryData[activeExpenseCatIndex].percentage.toFixed(1)}% · {debitCategoryData[activeExpenseCatIndex].count} txns
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="text-[10px] uppercase font-bold tracking-wider text-zinc-500">Expenses</span>
+                          <span className="text-base sm:text-lg font-black text-white font-mono tracking-tight">
+                            ₹{totalDebit >= 100000 ? (totalDebit / 100000).toFixed(1) + 'L' : totalDebit.toLocaleString('en-IN')}
+                          </span>
+                          <span className="text-[10px] text-zinc-500 font-medium">
+                            {debitCategoryData.length} categories
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Ranked Breakdown Table with Drilldown Accordion */}
+                <div className="md:col-span-7 space-y-2.5">
+                  <div className="flex items-center justify-between text-[11px] text-zinc-500 font-semibold uppercase tracking-wider pb-1.5 border-b border-zinc-800">
+                    <span>Category (Tap to inspect)</span>
+                    <span>Amount (% Share)</span>
+                  </div>
+
+                  {debitCategoryData
+                    .filter((cat) => !reportSearchQuery || cat.name.toLowerCase().includes(reportSearchQuery.toLowerCase()))
+                    .map((cat, idx) => {
+                      const color = EXPENSE_PALETTE[idx % EXPENSE_PALETTE.length];
+                      const isHovered = activeExpenseCatIndex === idx;
+                      const isExpanded = expandedCategory === cat.name;
+                      const categoryTxns = isExpanded ? getCategoryTransactions(cat.name, 'Debit') : [];
+
+                      return (
+                        <div 
+                          key={cat.name} 
+                          className={`rounded-2xl transition-all border ${
+                            isExpanded 
+                              ? 'bg-zinc-950/80 border-orange-500/40 p-3 space-y-3' 
+                              : isHovered 
+                              ? 'bg-zinc-850/60 border-zinc-700/80 p-2' 
+                              : 'bg-zinc-900/40 border-transparent hover:bg-zinc-850/40 p-2'
+                          }`}
+                        >
+                          <div 
+                            className="space-y-1.5 cursor-pointer"
+                            onMouseEnter={() => setActiveExpenseCatIndex(idx)}
+                            onMouseLeave={() => setActiveExpenseCatIndex(null)}
+                            onClick={() => setExpandedCategory(prev => prev === cat.name ? null : cat.name)}
+                          >
+                            <div className="flex items-center justify-between text-xs">
+                              <div className="flex items-center gap-2 truncate pr-2">
+                                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
+                                <span className={`font-semibold truncate ${isExpanded ? 'text-orange-400' : 'text-white'}`}>
+                                  {cat.name}
+                                </span>
+                                <span className="text-[10px] text-zinc-500 shrink-0">({cat.count} txns)</span>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <span className="font-semibold text-white font-mono">₹{cat.value.toLocaleString('en-IN')}</span>
+                                <span className="text-orange-400 text-[11px] font-bold">{cat.percentage.toFixed(1)}%</span>
+                                {isExpanded ? (
+                                  <ChevronUp className="w-3.5 h-3.5 text-orange-400" />
+                                ) : (
+                                  <ChevronDown className="w-3.5 h-3.5 text-zinc-500" />
+                                )}
+                              </div>
+                            </div>
+                            <div className="w-full bg-zinc-800/80 rounded-full h-1.5 overflow-hidden">
+                              <div 
+                                className="h-full rounded-full transition-all duration-500" 
+                                style={{ width: `${Math.max(cat.percentage, 2)}%`, backgroundColor: color }} 
+                              />
+                            </div>
+                          </div>
+
+                          {/* Inline Category Transaction Drilldown */}
+                          {isExpanded && (
+                            <div className="pt-2 border-t border-zinc-800/80 space-y-2">
+                              <div className="flex items-center justify-between text-[11px] text-zinc-400">
+                                <span className="font-medium">Recorded Expenses in {cat.name}</span>
+                                <span className="font-mono text-[10px] text-zinc-500">
+                                  Avg: ₹{cat.count > 0 ? Math.round(cat.value / cat.count).toLocaleString('en-IN') : 0}
+                                </span>
+                              </div>
+                              <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1 no-scrollbar">
+                                {categoryTxns.map((t: any) => (
+                                  <div 
+                                    key={t.id} 
+                                    className="p-2 rounded-xl bg-zinc-900 border border-zinc-800/80 flex items-center justify-between text-xs hover:border-zinc-700 transition-colors"
+                                  >
+                                    <div className="min-w-0 pr-2">
+                                      <div className="flex items-center gap-1.5 text-[11px]">
+                                        <span className="font-bold text-white">{format(parseISO(t.date), 'dd MMM yyyy')}</span>
+                                        <span className="px-1.5 py-0.2 rounded bg-zinc-800 text-zinc-400 text-[10px]">
+                                          {t.payment_type || 'Cash'}
+                                        </span>
+                                      </div>
+                                      <p className="text-[11px] text-zinc-400 truncate mt-0.5">{t.description || 'No description'}</p>
+                                    </div>
+                                    <span className="font-mono font-bold text-rose-400 shrink-0">
+                                      -₹{(Number(t.amount) || 0).toLocaleString('en-IN')}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* --- TAB 3: INCOME / CREDIT SOURCES --- */}
+      {activeReportTab === 'income' && (
+        <div className="space-y-6">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <h3 className="font-bold text-base sm:text-lg text-white">Inflow & Income Sources</h3>
+                <p className="text-zinc-500 text-xs">Total Inflow: ₹{totalCredit.toLocaleString('en-IN')} across {creditCategoryData.length} streams</p>
+              </div>
+              {expandedCategory && (
+                <button
+                  type="button"
+                  onClick={() => setExpandedCategory(null)}
+                  className="text-xs text-orange-400 hover:text-orange-300 font-semibold self-start sm:self-auto cursor-pointer"
+                >
+                  Collapse Details
+                </button>
+              )}
+            </div>
+
+            {creditCategoryData.length === 0 ? (
+              <div className="p-12 text-center text-zinc-500 text-xs">No income or credit transactions recorded in this period.</div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-8 items-start">
+                <div className="md:col-span-5 flex items-center justify-center sticky top-4">
+                  <div className="w-56 h-56 relative">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie
+                          data={creditCategoryData}
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={58}
+                          outerRadius={82}
+                          paddingAngle={3}
+                          dataKey="value"
+                          stroke="#18181b"
+                          strokeWidth={2}
+                          activeIndex={activeIncomeCatIndex !== null ? activeIncomeCatIndex : undefined}
+                          activeShape={renderReportActiveShape}
+                          onMouseEnter={(_, index) => setActiveIncomeCatIndex(index)}
+                          onMouseLeave={() => setActiveIncomeCatIndex(null)}
+                          onClick={(_, index) => {
+                            setActiveIncomeCatIndex(prev => prev === index ? null : index);
+                            const cat = creditCategoryData[index];
+                            if (cat) {
+                              setExpandedCategory(prev => prev === cat.name ? null : cat.name);
+                            }
+                          }}
+                        >
+                          {creditCategoryData.map((_entry, index) => (
+                            <Cell key={`rep-cr-cell-${index}`} fill={EXPENSE_PALETTE[(index + 3) % EXPENSE_PALETTE.length]} />
+                          ))}
+                        </Pie>
+                        <Tooltip
+                          content={({ active, payload }) => {
+                            if (active && payload && payload.length) {
+                              const d = payload[0].payload;
+                              return (
+                                <div className="bg-zinc-950/95 border border-zinc-800 p-2.5 rounded-xl shadow-xl text-xs backdrop-blur-md z-50">
+                                  <div className="font-bold text-white mb-0.5">{d.name}</div>
+                                  <div className="text-emerald-400 font-mono font-semibold">
+                                    ₹{d.value.toLocaleString('en-IN')} ({d.percentage.toFixed(1)}%)
+                                  </div>
+                                </div>
+                              );
+                            }
+                            return null;
+                          }}
+                        />
+                      </PieChart>
+                    </ResponsiveContainer>
+                    <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none text-center p-2 transition-all">
+                      {activeIncomeCatIndex !== null && creditCategoryData[activeIncomeCatIndex] ? (
+                        <>
+                          <span 
+                            className="text-[10px] uppercase font-bold tracking-wider truncate max-w-[130px] px-2 py-0.5 rounded-full border mb-0.5"
+                            style={{ 
+                              color: EXPENSE_PALETTE[(activeIncomeCatIndex + 3) % EXPENSE_PALETTE.length],
+                              borderColor: `${EXPENSE_PALETTE[(activeIncomeCatIndex + 3) % EXPENSE_PALETTE.length]}40`,
+                              backgroundColor: `${EXPENSE_PALETTE[(activeIncomeCatIndex + 3) % EXPENSE_PALETTE.length]}18`
+                            }}
+                          >
+                            {creditCategoryData[activeIncomeCatIndex].name}
+                          </span>
+                          <span className="text-base sm:text-lg font-black text-white font-mono tracking-tight">
+                            ₹{creditCategoryData[activeIncomeCatIndex].value >= 100000 
+                              ? (creditCategoryData[activeIncomeCatIndex].value / 100000).toFixed(2) + 'L' 
+                              : creditCategoryData[activeIncomeCatIndex].value.toLocaleString('en-IN')}
+                          </span>
+                          <span className="text-[10px] text-zinc-300 font-medium">
+                            {creditCategoryData[activeIncomeCatIndex].percentage.toFixed(1)}% · {creditCategoryData[activeIncomeCatIndex].count} receipts
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="text-[10px] uppercase font-bold tracking-wider text-zinc-500">Inflow</span>
+                          <span className="text-base sm:text-lg font-black text-white font-mono">
+                            ₹{totalCredit >= 100000 ? (totalCredit / 100000).toFixed(1) + 'L' : totalCredit.toLocaleString('en-IN')}
+                          </span>
+                          <span className="text-[10px] text-zinc-500 font-medium">
+                            {creditCategoryData.length} streams
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="md:col-span-7 space-y-2.5">
+                  <div className="flex items-center justify-between text-[11px] text-zinc-500 font-semibold uppercase tracking-wider pb-1.5 border-b border-zinc-800">
+                    <span>Source (Tap to inspect)</span>
+                    <span>Amount (% Share)</span>
+                  </div>
+                  {creditCategoryData
+                    .filter((cat) => !reportSearchQuery || cat.name.toLowerCase().includes(reportSearchQuery.toLowerCase()))
+                    .map((cat, idx) => {
+                      const color = EXPENSE_PALETTE[(idx + 3) % EXPENSE_PALETTE.length];
+                      const isHovered = activeIncomeCatIndex === idx;
+                      const isExpanded = expandedCategory === cat.name;
+                      const categoryTxns = isExpanded ? getCategoryTransactions(cat.name, 'Credit') : [];
+
+                      return (
+                        <div 
+                          key={cat.name} 
+                          className={`rounded-2xl transition-all border ${
+                            isExpanded 
+                              ? 'bg-zinc-950/80 border-emerald-500/40 p-3 space-y-3' 
+                              : isHovered 
+                              ? 'bg-zinc-850/60 border-zinc-700/80 p-2' 
+                              : 'bg-zinc-900/40 border-transparent hover:bg-zinc-850/40 p-2'
+                          }`}
+                        >
+                          <div 
+                            className="space-y-1.5 cursor-pointer"
+                            onMouseEnter={() => setActiveIncomeCatIndex(idx)}
+                            onMouseLeave={() => setActiveIncomeCatIndex(null)}
+                            onClick={() => setExpandedCategory(prev => prev === cat.name ? null : cat.name)}
+                          >
+                            <div className="flex items-center justify-between text-xs">
+                              <div className="flex items-center gap-2 truncate pr-2">
+                                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
+                                <span className={`font-semibold truncate ${isExpanded ? 'text-emerald-400' : 'text-white'}`}>
+                                  {cat.name}
+                                </span>
+                                <span className="text-[10px] text-zinc-500 shrink-0">({cat.count} txns)</span>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <span className="font-semibold text-white font-mono">₹{cat.value.toLocaleString('en-IN')}</span>
+                                <span className="text-emerald-400 text-[11px] font-bold">{cat.percentage.toFixed(1)}%</span>
+                                {isExpanded ? (
+                                  <ChevronUp className="w-3.5 h-3.5 text-emerald-400" />
+                                ) : (
+                                  <ChevronDown className="w-3.5 h-3.5 text-zinc-500" />
+                                )}
+                              </div>
+                            </div>
+                            <div className="w-full bg-zinc-800/80 rounded-full h-1.5 overflow-hidden">
+                              <div className="h-full rounded-full transition-all duration-500" style={{ width: `${Math.max(cat.percentage, 2)}%`, backgroundColor: color }} />
+                            </div>
+                          </div>
+
+                          {/* Inline Category Transaction Drilldown */}
+                          {isExpanded && (
+                            <div className="pt-2 border-t border-zinc-800/80 space-y-2">
+                              <div className="flex items-center justify-between text-[11px] text-zinc-400">
+                                <span className="font-medium">Recorded Receipts in {cat.name}</span>
+                                <span className="font-mono text-[10px] text-zinc-500">
+                                  Avg: ₹{cat.count > 0 ? Math.round(cat.value / cat.count).toLocaleString('en-IN') : 0}
+                                </span>
+                              </div>
+                              <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1 no-scrollbar">
+                                {categoryTxns.map((t: any) => (
+                                  <div 
+                                    key={t.id} 
+                                    className="p-2 rounded-xl bg-zinc-900 border border-zinc-800/80 flex items-center justify-between text-xs hover:border-zinc-700 transition-colors"
+                                  >
+                                    <div className="min-w-0 pr-2">
+                                      <div className="flex items-center gap-1.5 text-[11px]">
+                                        <span className="font-bold text-white">{format(parseISO(t.date), 'dd MMM yyyy')}</span>
+                                        <span className="px-1.5 py-0.2 rounded bg-zinc-800 text-zinc-400 text-[10px]">
+                                          {t.payment_type || 'Cash'}
+                                        </span>
+                                      </div>
+                                      <p className="text-[11px] text-zinc-400 truncate mt-0.5">{t.description || 'No description'}</p>
+                                    </div>
+                                    <span className="font-mono font-bold text-emerald-400 shrink-0">
+                                      +₹{(Number(t.amount) || 0).toLocaleString('en-IN')}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* --- TAB 4: PAYMENT MODES --- */}
+      {activeReportTab === 'payments' && (
+        <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-5">
+          <div>
+            <h3 className="font-bold text-base sm:text-lg text-white">Payment Modes Breakdown</h3>
+            <p className="text-zinc-500 text-xs">Volume and percentage share by payment instrument</p>
+          </div>
+
+          {paymentModeData.length === 0 ? (
+            <div className="p-12 text-center text-zinc-500 text-xs">No transactions logged in this period.</div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+              {paymentModeData.map((mode, idx) => {
+                const color = EXPENSE_PALETTE[idx % EXPENSE_PALETTE.length];
+                return (
+                  <div key={mode.name} className="p-4 rounded-2xl bg-zinc-950/60 border border-zinc-800/80 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <CreditCard className="w-4 h-4 text-orange-400" />
+                        <span className="font-bold text-sm text-white">{mode.name}</span>
+                      </div>
+                      <span className="text-xs font-bold text-orange-400">{mode.percentage.toFixed(1)}%</span>
+                    </div>
+                    <div>
+                      <p className="text-lg font-black text-white font-mono">₹{mode.value.toLocaleString('en-IN')}</p>
+                      <p className="text-[11px] text-zinc-500 mt-0.5">{mode.count} transaction{mode.count === 1 ? '' : 's'}</p>
+                    </div>
+                    <div className="w-full bg-zinc-800 rounded-full h-1.5 overflow-hidden">
+                      <div className="h-full rounded-full" style={{ width: `${mode.percentage}%`, backgroundColor: color }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* --- TAB 5: SUPPLIER ORDERS LEDGER --- */}
+      {activeReportTab === 'suppliers' && (
+        <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h3 className="font-bold text-base sm:text-lg text-white">Supplier Bills & Outstanding Payables</h3>
+              <p className="text-zinc-500 text-xs">
+                Total Orders: {filteredOrders.length} · Billed: ₹{totalOrdersAmount.toLocaleString('en-IN')} · Pending Dues: ₹{totalOrdersRemaining.toLocaleString('en-IN')}
+              </p>
+            </div>
+          </div>
+
+          {supplierData.length === 0 ? (
+            <div className="p-12 text-center text-zinc-500 text-xs">No orders or bills logged in this period.</div>
+          ) : (
+            <div className="overflow-x-auto no-scrollbar">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-zinc-800 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                    <th className="pb-3 pl-2">Supplier</th>
+                    <th className="pb-3 text-center">Orders</th>
+                    <th className="pb-3 text-right">Total Billed</th>
+                    <th className="pb-3 text-right">Amount Paid</th>
+                    <th className="pb-3 text-right pr-2">Remaining Due</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800/60 font-mono">
+                  {supplierData
+                    .filter((sup) => !reportSearchQuery || sup.supplier.toLowerCase().includes(reportSearchQuery.toLowerCase()))
+                    .map((sup) => (
+                    <tr key={sup.supplier} className="hover:bg-zinc-850/40 transition-colors">
+                      <td className="py-3 pl-2 font-sans font-bold text-white">{sup.supplier}</td>
+                      <td className="py-3 text-center text-zinc-400">{sup.orderCount}</td>
+                      <td className="py-3 text-right text-zinc-200">₹{sup.totalBilled.toLocaleString('en-IN')}</td>
+                      <td className="py-3 text-right text-emerald-400">₹{sup.totalPaid.toLocaleString('en-IN')}</td>
+                      <td className="py-3 text-right pr-2">
+                        <span className={`font-bold ${sup.remaining > 0 ? 'text-orange-400' : 'text-zinc-500'}`}>
+                          ₹{sup.remaining.toLocaleString('en-IN')}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
     </motion.div>
   );
 }
