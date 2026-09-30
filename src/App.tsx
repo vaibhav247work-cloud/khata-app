@@ -39,7 +39,18 @@ import {
   Shield,
   Sparkles,
   Receipt,
-  PackagePlus
+  PackagePlus,
+  Eye,
+  EyeOff,
+  User,
+  Lock,
+  UserCheck,
+  ShieldCheck,
+  UserPlus,
+  ArrowRightLeft,
+  Send,
+  Link as LinkIcon,
+  Key
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { db, type Transaction, type Order, type OrderPayment, type OrderItem } from './db';
@@ -50,6 +61,14 @@ import {
   reconcileOrdersWithTransactions,
   deleteTransactionsWithRecalculation,
   deleteOrderWithAssociated,
+  verifyUserWithGoogleSheet,
+  requestNewUserWithGoogleSheet,
+  requestRoleChangeWithGoogleSheet,
+  changeUserPasswordWithGoogleSheet,
+  fetchUsersWithGoogleSheet,
+  updateUserWithGoogleSheet,
+  deleteUserWithGoogleSheet,
+  parseIsActive,
   type SyncTrigger 
 } from './sync';
 import { 
@@ -111,6 +130,233 @@ const PAYMENT_TYPES = DEFAULT_PAYMENT_MODES;
 const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8'];
 const SYNC_PENDING_KEY = 'BT_PENDING_SYNC';
 const LAST_SYNC_AT_KEY = 'BT_LAST_SYNC_AT';
+const AUTH_SESSION_KEY = 'BT_AUTH_SESSION';
+
+interface AuthSession {
+  username: string;
+  role: 'admin' | 'staff';
+  name: string;
+  password?: string;
+  loggedInAt: string;
+}
+
+export interface RegisteredUser {
+  username: string;
+  name: string;
+  password: string;
+  role: 'admin' | 'staff';
+  active: boolean;
+  requestedAt: string;
+}
+
+const LOCAL_USERS_KEY = 'BT_REGISTERED_USERS';
+
+export const getRegisteredUsers = (): RegisteredUser[] => {
+  try {
+    const raw = localStorage.getItem(LOCAL_USERS_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return [];
+};
+
+export const saveRegisteredUser = (user: RegisteredUser) => {
+  try {
+    const users = getRegisteredUsers().filter(
+      (u) => u.username.toLowerCase() !== user.username.toLowerCase()
+    );
+    users.push(user);
+    localStorage.setItem(LOCAL_USERS_KEY, JSON.stringify(users));
+  } catch {}
+};
+
+export const updateRegisteredUserStatus = (username: string, updates: Partial<RegisteredUser>) => {
+  try {
+    const users = getRegisteredUsers().map((u) => {
+      if (u.username.toLowerCase() === username.toLowerCase()) {
+        return { ...u, ...updates };
+      }
+      return u;
+    });
+    localStorage.setItem(LOCAL_USERS_KEY, JSON.stringify(users));
+  } catch {}
+};
+
+export const deleteRegisteredUser = (username: string) => {
+  try {
+    const users = getRegisteredUsers().filter(
+      (u) => u.username.toLowerCase() !== username.toLowerCase()
+    );
+    localStorage.setItem(LOCAL_USERS_KEY, JSON.stringify(users));
+  } catch {}
+};
+
+// --- Password Validation & Strength Utilities ---
+
+export interface PasswordValidationResult {
+  isValid: boolean;
+  score: number; // 0 to 4
+  strengthLabel: 'Too Short' | 'Weak' | 'Fair' | 'Good' | 'Strong';
+  strengthColor: string;
+  hasLength: boolean;
+  hasLetter: boolean;
+  hasNumber: boolean;
+  matchesUsername: boolean;
+  isBlacklisted: boolean;
+  errorMessage?: string;
+}
+
+const COMMON_WEAK_PASSWORDS = new Set([
+  'admin',
+  'admin123',
+  'password',
+  'password123',
+  '123456',
+  '12345678',
+  '123456789',
+  '1234567890',
+  'qwerty',
+  'letmein',
+  'welcome',
+  'pass123',
+]);
+
+export const validatePassword = (password: string, username = ''): PasswordValidationResult => {
+  const trimmed = password.trim();
+  const cleanUser = username.trim().toLowerCase();
+  const hasLength = trimmed.length >= 6;
+  const hasLetter = /[a-zA-Z]/.test(trimmed);
+  const hasNumber = /[0-9]/.test(trimmed);
+  const hasSpecial = /[^a-zA-Z0-9]/.test(trimmed);
+  const matchesUsername = Boolean(cleanUser && cleanUser.length >= 3 && trimmed.toLowerCase() === cleanUser);
+  const isBlacklisted = COMMON_WEAK_PASSWORDS.has(trimmed.toLowerCase());
+
+  let score = 0;
+  if (hasLength) score++;
+  if (hasLetter && hasNumber) score++;
+  if (trimmed.length >= 8) score++;
+  if (hasSpecial || (trimmed.length >= 10 && hasLetter && hasNumber)) score++;
+
+  if (isBlacklisted || matchesUsername) {
+    score = Math.min(score, 1);
+  }
+
+  let strengthLabel: PasswordValidationResult['strengthLabel'] = 'Too Short';
+  let strengthColor = 'bg-zinc-700';
+
+  if (!trimmed) {
+    strengthLabel = 'Too Short';
+    strengthColor = 'bg-zinc-700';
+  } else if (!hasLength || score <= 1) {
+    strengthLabel = 'Weak';
+    strengthColor = 'bg-rose-500';
+  } else if (score === 2) {
+    strengthLabel = 'Fair';
+    strengthColor = 'bg-amber-500';
+  } else if (score === 3) {
+    strengthLabel = 'Good';
+    strengthColor = 'bg-blue-500';
+  } else {
+    strengthLabel = 'Strong';
+    strengthColor = 'bg-emerald-500';
+  }
+
+  let errorMessage: string | undefined;
+  if (!trimmed) {
+    errorMessage = 'Password is required';
+  } else if (!hasLength) {
+    errorMessage = 'Password must be at least 6 characters long';
+  } else if (!hasLetter || !hasNumber) {
+    errorMessage = 'Password must contain both letters and numbers';
+  } else if (isBlacklisted) {
+    errorMessage = 'This password is too easily guessed (e.g. common dictionary word). Please choose a more secure password';
+  } else if (matchesUsername) {
+    errorMessage = 'Password cannot be the same as your username';
+  }
+
+  return {
+    isValid: !errorMessage,
+    score,
+    strengthLabel,
+    strengthColor,
+    hasLength,
+    hasLetter,
+    hasNumber,
+    matchesUsername,
+    isBlacklisted,
+    errorMessage,
+  };
+};
+
+function PasswordStrengthMeter({
+  password,
+  username = '',
+  confirmPassword,
+}: {
+  password: string;
+  username?: string;
+  confirmPassword?: string;
+}) {
+  if (!password) return null;
+
+  const result = validatePassword(password, username);
+  const hasConfirm = confirmPassword !== undefined && confirmPassword.length > 0;
+  const isMatch = hasConfirm ? password === confirmPassword : true;
+
+  return (
+    <div className="p-3 rounded-2xl bg-zinc-950/70 border border-zinc-800/80 text-[11px] space-y-2 mt-2">
+      {/* 4-segment strength bar */}
+      <div className="space-y-1">
+        <div className="flex items-center justify-between text-[10px]">
+          <span className="text-zinc-400 font-medium">Password Strength:</span>
+          <span className={`font-bold ${
+            result.strengthLabel === 'Strong' ? 'text-emerald-400' :
+            result.strengthLabel === 'Good' ? 'text-blue-400' :
+            result.strengthLabel === 'Fair' ? 'text-amber-400' :
+            'text-rose-400'
+          }`}>
+            {result.strengthLabel}
+          </span>
+        </div>
+        <div className="grid grid-cols-4 gap-1 h-1.5">
+          {[1, 2, 3, 4].map((seg) => (
+            <div
+              key={seg}
+              className={`h-full rounded-full transition-all ${
+                result.score >= seg ? result.strengthColor : 'bg-zinc-800'
+              }`}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* Checklist */}
+      <div className="grid grid-cols-2 gap-1.5 text-[10px] pt-0.5">
+        <div className={`flex items-center gap-1.5 ${result.hasLength ? 'text-emerald-400 font-medium' : 'text-zinc-500'}`}>
+          {result.hasLength ? <Check className="w-3 h-3 shrink-0" /> : <span className="w-1.5 h-1.5 rounded-full bg-zinc-600 shrink-0 ml-0.5 mr-1" />}
+          <span>At least 6 characters</span>
+        </div>
+        <div className={`flex items-center gap-1.5 ${result.hasLetter && result.hasNumber ? 'text-emerald-400 font-medium' : 'text-zinc-500'}`}>
+          {result.hasLetter && result.hasNumber ? <Check className="w-3 h-3 shrink-0" /> : <span className="w-1.5 h-1.5 rounded-full bg-zinc-600 shrink-0 ml-0.5 mr-1" />}
+          <span>Letters & numbers</span>
+        </div>
+        {hasConfirm && (
+          <div className={`col-span-2 flex items-center gap-1.5 ${isMatch ? 'text-emerald-400 font-medium' : 'text-rose-400 font-medium'}`}>
+            {isMatch ? <Check className="w-3 h-3 shrink-0" /> : <X className="w-3 h-3 shrink-0" />}
+            <span>{isMatch ? 'Passwords match' : 'Passwords do not match yet'}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Specific warnings */}
+      {(result.isBlacklisted || result.matchesUsername) && (
+        <div className="flex items-center gap-1.5 text-[10px] text-rose-400 font-medium pt-1 border-t border-zinc-800/80">
+          <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+          <span>{result.errorMessage}</span>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // --- Shared File, PDF & Native Share Utilities ---
 
@@ -804,7 +1050,60 @@ const generateAndSharePassbookPDF = async (
 // --- Components ---
 
 export default function App() {
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [authSession, setAuthSession] = useState<AuthSession | null>(() => {
+    try {
+      const saved = localStorage.getItem(AUTH_SESSION_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.error('Failed to parse saved auth session', e);
+    }
+    return null;
+  });
+
+  const isLoggedIn = !!authSession;
+  const [isAdmin, setIsAdmin] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem(AUTH_SESSION_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return parsed.role === 'admin';
+      }
+    } catch {}
+    return localStorage.getItem('BT_IS_ADMIN') === 'true';
+  });
+
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [loginUsername, setLoginUsername] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+
+  // Registration / New user request state
+  const [isRegisterMode, setIsRegisterMode] = useState(false);
+  const [regName, setRegName] = useState('');
+  const [regUsername, setRegUsername] = useState('');
+  const [regPassword, setRegPassword] = useState('');
+  const [regConfirmPassword, setRegConfirmPassword] = useState('');
+  const [showRegPassword, setShowRegPassword] = useState(false);
+  const [showRegConfirmPassword, setShowRegConfirmPassword] = useState(false);
+  const [regRole, setRegRole] = useState<'staff' | 'admin'>('staff');
+  const [isSubmittingReg, setIsSubmittingReg] = useState(false);
+  const [regStatusMessage, setRegStatusMessage] = useState<string | null>(null);
+
+  // Role change request modal state
+  const [isRoleChangeModalOpen, setIsRoleChangeModalOpen] = useState(false);
+  const [roleChangeTarget, setRoleChangeTarget] = useState<'admin' | 'staff'>('admin');
+  const [roleChangeReason, setRoleChangeReason] = useState('');
+  const [isSubmittingRoleChange, setIsSubmittingRoleChange] = useState(false);
+
+  // Change password modal state
+  const [isChangePasswordModalOpen, setIsChangePasswordModalOpen] = useState(false);
+  const [currPassword, setCurrPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmNewPassword, setShowConfirmNewPassword] = useState(false);
+  const [isChangingPassword, setIsChangingPassword] = useState(false);
+
   const [activeTab, setActiveTab] = useState<Tab>('Dashboard');
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
@@ -813,20 +1112,68 @@ export default function App() {
   const [hasPendingSync, setHasPendingSync] = useState(() => localStorage.getItem(SYNC_PENDING_KEY) === 'true');
   const [lastSyncedAt, setLastSyncedAt] = useState(() => localStorage.getItem(LAST_SYNC_AT_KEY) || '');
   const [apiLink, setApiLink] = useState(localStorage.getItem('BT_API_LINK') || '');
+  const [showScriptConfig, setShowScriptConfig] = useState(false);
+  const [quickApiLink, setQuickApiLink] = useState(localStorage.getItem('BT_API_LINK') || '');
+
+  useEffect(() => {
+    setQuickApiLink(apiLink);
+  }, [apiLink]);
+
+  const handleSaveQuickApiLink = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanLink = quickApiLink.trim();
+    setApiLink(cleanLink);
+    localStorage.setItem('BT_API_LINK', cleanLink);
+    showToast(cleanLink ? 'Google Script Web App URL updated!' : 'Google Script URL cleared', 'success');
+    setShowScriptConfig(false);
+  };
+
+  const fillDefaultAdminCredentials = () => {
+    setLoginUsername('admin');
+    setLoginPassword('admin');
+    showToast('Filled default credentials: admin / admin', 'info');
+  };
   const [searchQuery, setSearchQuery] = useState('');
   const [filterDate, setFilterDate] = useState<'All' | 'Today' | 'This Week' | 'This Month' | 'Custom'>('All');
   const [customDateRange, setCustomDateRange] = useState({ start: '', end: '' });
   const [exitConfirm, setExitConfirm] = useState(false);
   const exitConfirmRef = useRef(false);
   const syncInFlightRef = useRef(false);
-  const [isAdmin, setIsAdmin] = useState(localStorage.getItem('BT_IS_ADMIN') === 'true');
   const [toast, setToast] = useState<{ message: string, type: 'success' | 'error' | 'info' } | null>(null);
+  const toastTimeoutRef = useRef<NodeJS.Timeout | number | null>(null);
   const [pdfPreviewData, setPdfPreviewData] = useState<PdfPreviewData | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+    }
     setToast({ message, type });
-    setTimeout(() => setToast(null), 3000);
+    toastTimeoutRef.current = setTimeout(() => {
+      setToast(null);
+    }, 4000);
+  };
+
+  const performLogin = (session: AuthSession) => {
+    localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(session));
+    localStorage.setItem('BT_IS_ADMIN', (session.role === 'admin').toString());
+    setAuthSession(session);
+    setIsAdmin(session.role === 'admin');
+    showToast(`Welcome back, ${session.name || session.username} (${session.role === 'admin' ? 'Admin' : 'Staff'})`, 'success');
+  };
+
+  const handleLogout = (reason?: string) => {
+    localStorage.removeItem(AUTH_SESSION_KEY);
+    setAuthSession(null);
+    setIsAdmin(false);
+    setActiveTab('Dashboard');
+    tabHistoryRef.current = ['Dashboard'];
+    activeTabRef.current = 'Dashboard';
+    if (reason) {
+      showToast(reason, 'error');
+    } else {
+      showToast('Logged out successfully', 'info');
+    }
   };
 
   const toggleAdmin = (val: boolean) => {
@@ -975,6 +1322,18 @@ export default function App() {
     return true;
   }, !!pdfPreviewData, 100);
 
+  // Back handler for role change request modal
+  useBackHandler(() => {
+    setIsRoleChangeModalOpen(false);
+    return true;
+  }, isRoleChangeModalOpen, 95);
+
+  // Back handler for change password modal
+  useBackHandler(() => {
+    setIsChangePasswordModalOpen(false);
+    return true;
+  }, isChangePasswordModalOpen, 96);
+
   // Back handler to close collapsible sidebar
   useBackHandler(() => {
     setIsSidebarOpen(false);
@@ -993,13 +1352,328 @@ export default function App() {
   }, [isSidebarOpen]);
 
   // --- Auth ---
-  const handleLogin = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleLogin = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    const formData = new FormData(e.currentTarget);
-    if (formData.get('username') === 'admin' && formData.get('password') === 'admin123') {
-      setIsLoggedIn(true);
-    } else {
-      showToast('Invalid credentials', 'error');
+    const username = loginUsername.trim();
+    const password = loginPassword;
+
+    if (!username || !password) {
+      showToast('Please enter both username and password', 'error');
+      return;
+    }
+
+    setIsLoggingIn(true);
+
+    try {
+      // 1. If Google Sheet API link is configured and device is online, verify live against Google Sheets Users tab
+      if (apiLink && isOnline) {
+        try {
+          const res = await verifyUserWithGoogleSheet(apiLink, username, password);
+          if (res.authenticated && res.user) {
+            performLogin({
+              username: res.user.username,
+              role: res.user.role,
+              name: res.user.name,
+              password: password,
+              loggedInAt: new Date().toISOString(),
+            });
+            return;
+          } else {
+            if (res.isPending) {
+              showToast(res.message || 'Registration is pending admin approval in Google Sheets.', 'info');
+            } else {
+              showToast(res.message || 'Invalid credentials or disabled account in Google Sheet', 'error');
+            }
+            return;
+          }
+        } catch (sheetErr: any) {
+          console.warn('Live Google Sheet authentication failed, checking local credentials:', sheetErr?.message || sheetErr);
+        }
+      }
+
+      // 2. Local registered users check
+      const localUsers = getRegisteredUsers();
+      const matchedLocal = localUsers.find(
+        (u) => u.username.toLowerCase() === username.toLowerCase()
+      );
+      if (matchedLocal) {
+        if (!matchedLocal.active) {
+          showToast('Your registration is pending administrator approval.', 'info');
+          return;
+        }
+        if (matchedLocal.password === password) {
+          performLogin({
+            username: matchedLocal.username,
+            role: matchedLocal.role,
+            name: matchedLocal.name,
+            password: password,
+            loggedInAt: new Date().toISOString(),
+          });
+          return;
+        } else {
+          showToast('Incorrect password', 'error');
+          return;
+        }
+      }
+
+      // 3. Offline fallback: verify against previously authenticated user session credentials
+      const savedSession = localStorage.getItem(AUTH_SESSION_KEY);
+      if (savedSession) {
+        try {
+          const parsed = JSON.parse(savedSession);
+          if (
+            parsed.username &&
+            parsed.username.toLowerCase() === username.toLowerCase() &&
+            parsed.password === password
+          ) {
+            performLogin({
+              username: parsed.username,
+              role: parsed.role || 'staff',
+              name: parsed.name || parsed.username,
+              password: password,
+              loggedInAt: new Date().toISOString(),
+            });
+            showToast(`Signed in offline as ${parsed.name || parsed.username}`, 'info');
+            return;
+          }
+        } catch {}
+      }
+
+      // 4. First-time setup / Standalone Default Admin fallback:
+      // Enables login when Google Script URL is not set yet, or for default admin recovery
+      if (username.toLowerCase() === 'admin' && password === 'admin') {
+        performLogin({
+          username: 'admin',
+          role: 'admin',
+          name: 'Administrator',
+          password: 'admin',
+          loggedInAt: new Date().toISOString(),
+        });
+        if (!apiLink) {
+          showToast('Signed in as Default Admin. Connect your Google Sheet in Admin Settings.', 'success');
+        } else {
+          showToast('Signed in with Default Admin credentials', 'success');
+        }
+        return;
+      }
+
+      showToast('Invalid credentials or user not found. Please check your username and password.', 'error');
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleRequestNewUser = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const cleanUsername = regUsername.trim();
+    const cleanName = regName.trim();
+    const cleanPassword = regPassword;
+
+    if (!cleanUsername || !cleanPassword) {
+      showToast('Please fill in username and password', 'error');
+      return;
+    }
+
+    if (cleanUsername.length < 3) {
+      showToast('Username must be at least 3 characters', 'error');
+      return;
+    }
+
+    if (cleanUsername.toLowerCase() === 'admin') {
+      showToast("The username 'admin' is reserved for the primary administrator", 'error');
+      return;
+    }
+
+    // Password security and strength validation
+    const passValidation = validatePassword(cleanPassword, cleanUsername);
+    if (!passValidation.isValid) {
+      showToast(passValidation.errorMessage || 'Please choose a stronger password', 'error');
+      return;
+    }
+
+    if (cleanPassword !== regConfirmPassword) {
+      showToast('Passwords do not match. Please verify your confirm password.', 'error');
+      return;
+    }
+
+    // Immediately save request locally so user request is never lost
+    saveRegisteredUser({
+      username: cleanUsername,
+      name: cleanName || cleanUsername,
+      password: cleanPassword,
+      role: regRole,
+      active: false,
+      requestedAt: new Date().toISOString(),
+    });
+
+    setIsSubmittingReg(true);
+    setRegStatusMessage(null);
+
+    try {
+      if (apiLink && isOnline) {
+        const res = await requestNewUserWithGoogleSheet(apiLink, {
+          username: cleanUsername,
+          name: cleanName || cleanUsername,
+          password: cleanPassword,
+          role: regRole,
+        });
+
+        if (res.success) {
+          setRegStatusMessage(res.message);
+          showToast('Registration request sent to Google Sheet!', 'success');
+          setRegPassword('');
+          setRegConfirmPassword('');
+          return;
+        }
+
+        if (res.isScriptOutdated) {
+          setRegStatusMessage(
+            'Your registration request has been saved on this device (pending administrator approval). To sync new users directly to your Google Sheet, please update the Google Apps Script in Google Sheets with the latest code from Admin Settings.'
+          );
+          showToast('Request saved locally (Google Apps Script update needed)', 'info');
+          setRegPassword('');
+          setRegConfirmPassword('');
+          return;
+        }
+
+        if (!res.success) {
+          showToast(res.message || 'Registration request could not be processed', 'error');
+          return;
+        }
+      } else if (!apiLink) {
+        // No apiLink configured
+        setRegStatusMessage(
+          'Your registration request has been saved locally on this device! Because Google Sheet URL is not configured yet, an administrator can activate your account in Admin Settings.'
+        );
+        showToast('Registration request saved locally (pending approval)', 'success');
+        setRegPassword('');
+        setRegConfirmPassword('');
+        return;
+      } else {
+        // Offline with apiLink
+        setRegStatusMessage(
+          'You are offline. Your registration request has been saved locally on this device. Once online, an administrator can approve your account.'
+        );
+        showToast('Registration saved locally (offline mode)', 'info');
+        setRegPassword('');
+        setRegConfirmPassword('');
+        return;
+      }
+    } catch (err: any) {
+      console.warn('Google Sheet registration sync warning:', err);
+      setRegStatusMessage(
+        `Registration request recorded locally on this device! (Google Sheet sync note: ${err?.message || 'Network error'}). An administrator can activate your account.`
+      );
+      showToast('Saved locally. Administrator approval required.', 'info');
+      setRegPassword('');
+      setRegConfirmPassword('');
+    } finally {
+      setIsSubmittingReg(false);
+    }
+  };
+
+  const handleRoleChangeRequest = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!authSession) return;
+
+    if (!apiLink) {
+      showToast('Google Sheet API link is not configured', 'error');
+      return;
+    }
+
+    if (!isOnline) {
+      showToast('Internet connection required to submit role change request', 'error');
+      return;
+    }
+
+    setIsSubmittingRoleChange(true);
+
+    try {
+      const res = await requestRoleChangeWithGoogleSheet(apiLink, {
+        username: authSession.username,
+        password: authSession.password,
+        targetRole: roleChangeTarget,
+        reason: roleChangeReason,
+      });
+
+      if (res.success) {
+        showToast(res.message, 'success');
+        setIsRoleChangeModalOpen(false);
+        setRoleChangeReason('');
+        // Trigger background sync to pull any immediate admin updates
+        void syncWithGoogleSheets('manual');
+      } else {
+        showToast(res.message, 'error');
+      }
+    } catch (err: any) {
+      console.error('Role change request failed', err);
+      showToast(err?.message || 'Failed to submit role change request', 'error');
+    } finally {
+      setIsSubmittingRoleChange(false);
+    }
+  };
+
+  const handleChangePassword = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!authSession) return;
+
+    const trimmedNew = newPassword.trim();
+    const passValidation = validatePassword(trimmedNew, authSession.username);
+    if (!passValidation.isValid) {
+      showToast(passValidation.errorMessage || 'Please choose a stronger password', 'error');
+      return;
+    }
+
+    if (trimmedNew !== confirmNewPassword.trim()) {
+      showToast('New passwords do not match. Please verify your confirm password.', 'error');
+      return;
+    }
+
+    if (authSession.password && trimmedNew === authSession.password) {
+      showToast('New password cannot be the same as your current password', 'error');
+      return;
+    }
+
+    // Verify current password if user has one stored
+    if (authSession.password && currPassword && currPassword !== authSession.password) {
+      showToast('Current password is incorrect', 'error');
+      return;
+    }
+
+    setIsChangingPassword(true);
+
+    try {
+      if (apiLink && isOnline) {
+        try {
+          const res = await changeUserPasswordWithGoogleSheet(apiLink, {
+            username: authSession.username,
+            oldPassword: currPassword || authSession.password,
+            newPassword: trimmedNew,
+          });
+          if (!res.success) {
+            showToast(res.message, 'error');
+            return;
+          }
+        } catch (sheetErr: any) {
+          console.warn('Google Sheet password sync failed:', sheetErr);
+          showToast('Updated locally. (Google Sheet sync failed: ' + (sheetErr?.message || 'Network error') + ')', 'info');
+        }
+      }
+
+      const updatedSession: AuthSession = {
+        ...authSession,
+        password: trimmedNew,
+      };
+      setAuthSession(updatedSession);
+      localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(updatedSession));
+
+      showToast('Password changed successfully! Google Password Manager will accept your new password.', 'success');
+      setIsChangePasswordModalOpen(false);
+      setCurrPassword('');
+      setNewPassword('');
+      setConfirmNewPassword('');
+    } finally {
+      setIsChangingPassword(false);
     }
   };
 
@@ -1063,7 +1737,34 @@ export default function App() {
     setIsSyncing(true);
 
     try {
-      await syncLocalAndGoogleSheets(apiLink);
+      const syncResult = await syncLocalAndGoogleSheets(
+        apiLink,
+        authSession?.password ? { username: authSession.username, password: authSession.password } : undefined
+      );
+
+      // If credentials or user permissions were revoked in Google Sheet, automatically logout
+      if (syncResult.authRevoked) {
+        handleLogout(syncResult.authReason || 'Credentials or access updated in Google Sheet. Please log in again.');
+        return false;
+      }
+
+      // If role or name was updated directly in Google Sheet, update the active session dynamically!
+      if (syncResult.userUpdate && authSession) {
+        const newRole = syncResult.userUpdate.role;
+        const newName = syncResult.userUpdate.name;
+        if (newRole !== authSession.role || newName !== authSession.name) {
+          const updatedSession: AuthSession = {
+            ...authSession,
+            role: newRole,
+            name: newName,
+          };
+          localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(updatedSession));
+          localStorage.setItem('BT_IS_ADMIN', (newRole === 'admin').toString());
+          setAuthSession(updatedSession);
+          setIsAdmin(newRole === 'admin');
+          showToast(`Access updated to ${newRole === 'admin' ? 'Admin' : 'Staff'} from Google Sheet`, 'info');
+        }
+      }
 
       clearSyncPending();
       const syncedAt = new Date().toISOString();
@@ -1205,56 +1906,448 @@ export default function App() {
 
   if (!isLoggedIn) {
     return (
-      <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4 font-sans">
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4 font-sans relative overflow-hidden">
+        {/* Subtle background ambient glow */}
+        <div className="pointer-events-none absolute -top-40 -left-40 w-96 h-96 bg-orange-500/10 rounded-full blur-3xl" />
+        <div className="pointer-events-none absolute -bottom-40 -right-40 w-96 h-96 bg-amber-500/10 rounded-full blur-3xl" />
+
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-3xl p-8 shadow-2xl"
+          className="w-full max-w-md bg-zinc-900/90 backdrop-blur-xl border border-zinc-800 rounded-3xl p-6 sm:p-8 shadow-2xl relative z-10"
         >
-          <div className="flex flex-col items-center mb-8">
-            <div className="w-16 h-16 bg-orange-500 rounded-2xl flex items-center justify-center mb-4 shadow-lg shadow-orange-500/20">
+          <div className="flex flex-col items-center mb-5">
+            <div className="w-16 h-16 bg-gradient-to-tr from-orange-600 via-orange-500 to-amber-500 rounded-2xl flex items-center justify-center mb-3 shadow-lg shadow-orange-500/25 ring-2 ring-orange-500/30">
               <Building2 className="text-white w-8 h-8" />
             </div>
-            <h1 className="text-2xl font-bold text-white">KhataBook Pro</h1>
-            <div className="flex flex-col items-center">
-              <p className="text-zinc-500 text-sm">Business Management Software</p>
-              <p className="text-zinc-600 text-[10px]">made by VaibhavK</p>
+            <h1 className="text-2xl font-bold text-white tracking-tight">KhataBook Pro</h1>
+            <p className="text-zinc-400 text-xs mt-0.5">Construction Business Management</p>
+            <div className="w-full mt-2 space-y-2">
+              <div className="flex items-center justify-between px-3 py-1.5 rounded-full bg-zinc-800/80 border border-zinc-700/60 text-[11px] text-zinc-400">
+                <div className="flex items-center gap-1.5 truncate mr-2">
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${apiLink ? (isOnline ? 'bg-emerald-400 shadow-xs shadow-emerald-400' : 'bg-amber-400') : 'bg-zinc-500'}`} />
+                  <span className="truncate">{apiLink ? (isOnline ? 'Google Sheet Connected' : 'Offline Mode (Local Auth)') : 'Standalone Mode (No Script URL)'}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowScriptConfig(!showScriptConfig)}
+                  className="text-orange-400 hover:text-orange-300 shrink-0 font-medium flex items-center gap-1 transition-colors"
+                  title={apiLink ? 'Change Script URL' : 'Set Script URL'}
+                >
+                  <LinkIcon className="w-3 h-3" />
+                  <span>{showScriptConfig ? 'Close' : apiLink ? 'Edit URL' : 'Set URL'}</span>
+                </button>
+              </div>
+
+              <AnimatePresence>
+                {showScriptConfig && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="overflow-hidden"
+                  >
+                    <form onSubmit={handleSaveQuickApiLink} className="p-3 bg-zinc-950/90 rounded-2xl border border-zinc-800 space-y-2 text-left">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-semibold text-zinc-300">Google Apps Script Web App URL</span>
+                        <span className="text-[10px] text-zinc-500">exec endpoint</span>
+                      </div>
+                      <input
+                        type="url"
+                        value={quickApiLink}
+                        onChange={(e) => setQuickApiLink(e.target.value)}
+                        placeholder="https://script.google.com/macros/s/.../exec"
+                        className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-white placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-orange-500 font-mono"
+                      />
+                      <div className="flex items-center justify-end gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => setShowScriptConfig(false)}
+                          className="px-2.5 py-1 rounded-lg text-xs text-zinc-400 hover:text-white"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          className="px-3 py-1 bg-orange-600 hover:bg-orange-500 text-white font-medium text-xs rounded-lg shadow-sm transition-colors"
+                        >
+                          Save URL
+                        </button>
+                      </div>
+                    </form>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
           </div>
 
-          <form onSubmit={handleLogin} className="space-y-6">
-            <div>
-              <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-2">Username</label>
-              <input 
-                name="username"
-                type="text" 
-                defaultValue="admin"
-                className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-orange-500 transition-all"
-                placeholder="Enter username"
-              />
+          {/* First-time setup banner when no script URL is configured */}
+          {!apiLink && (
+            <div className="mb-4 p-3.5 rounded-2xl bg-orange-500/10 border border-orange-500/25 text-xs text-orange-200">
+              <div className="flex items-start gap-2.5">
+                <Sparkles className="w-4 h-4 text-orange-400 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-white">First-Time Setup Ready</span>
+                    <button
+                      type="button"
+                      onClick={fillDefaultAdminCredentials}
+                      className="text-[10px] font-medium text-orange-400 hover:text-orange-300 underline underline-offset-2 ml-2"
+                    >
+                      Auto-fill admin/admin
+                    </button>
+                  </div>
+                  <p className="text-zinc-300 text-[11px] mt-1 leading-relaxed">
+                    No Google Script URL is configured yet. You can log in right away with default credentials: <strong className="text-orange-300">admin</strong> / <strong className="text-orange-300">admin</strong> to access the dashboard and paste your script URL in Admin settings.
+                  </p>
+                </div>
+              </div>
             </div>
-            <div>
-              <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-2">Password</label>
-              <input 
-                name="password"
-                type="password" 
-                defaultValue="admin123"
-                className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-orange-500 transition-all"
-                placeholder="Enter password"
-              />
-            </div>
-            <button 
-              type="submit"
-              className="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-orange-500/20 active:scale-95"
+          )}
+
+          {/* Mode Switcher: Sign In vs Request New User */}
+          <div className="grid grid-cols-2 gap-1.5 p-1 bg-zinc-950/80 rounded-2xl border border-zinc-800 mb-5">
+            <button
+              type="button"
+              onClick={() => {
+                setIsRegisterMode(false);
+                setRegStatusMessage(null);
+              }}
+              className={`flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${
+                !isRegisterMode
+                  ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20'
+                  : 'text-zinc-400 hover:text-white hover:bg-zinc-850'
+              }`}
             >
-              Login to Dashboard
+              <UserCheck className="w-3.5 h-3.5" />
+              <span>Sign In</span>
             </button>
-          </form>
-          <div className="mt-8 text-center text-zinc-600 text-xs space-y-1">
-            <p>Default: admin / admin123</p>
-            <p>Default user: user / user123</p>
+            <button
+              type="button"
+              onClick={() => {
+                setIsRegisterMode(true);
+                setRegStatusMessage(null);
+              }}
+              className={`flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${
+                isRegisterMode
+                  ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20'
+                  : 'text-zinc-400 hover:text-white hover:bg-zinc-850'
+              }`}
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              <span>Request New User</span>
+            </button>
           </div>
+
+          {!isRegisterMode ? (
+            /* --- Sign In View --- */
+            <>
+              <form onSubmit={handleLogin} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-medium text-zinc-400 uppercase tracking-wider mb-1.5">
+                    Username
+                  </label>
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-zinc-500">
+                      <User className="w-4 h-4" />
+                    </div>
+                    <input 
+                      type="text" 
+                      value={loginUsername}
+                      onChange={(e) => setLoginUsername(e.target.value)}
+                      className="w-full bg-zinc-950/70 border border-zinc-700/80 rounded-xl pl-10 pr-4 py-3 text-sm text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-orange-500 transition-all"
+                      placeholder="Enter username"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      autoComplete="username"
+                      disabled={isLoggingIn}
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-zinc-400 uppercase tracking-wider mb-1.5">Password</label>
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-zinc-500">
+                      <Lock className="w-4 h-4" />
+                    </div>
+                    <input 
+                      type={showPassword ? 'text' : 'password'}
+                      value={loginPassword}
+                      onChange={(e) => setLoginPassword(e.target.value)}
+                      className="w-full bg-zinc-950/70 border border-zinc-700/80 rounded-xl pl-10 pr-11 py-3 text-sm text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-orange-500 transition-all"
+                      placeholder="Enter password"
+                      autoComplete="current-password"
+                      disabled={isLoggingIn}
+                      required
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-zinc-400 hover:text-white transition-colors"
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    >
+                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                <button 
+                  type="submit"
+                  disabled={isLoggingIn}
+                  className="w-full bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 text-white font-bold py-3.5 rounded-xl transition-all shadow-lg shadow-orange-500/25 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 mt-2"
+                >
+                  {isLoggingIn ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin text-white" />
+                      <span>Verifying Credentials...</span>
+                    </>
+                  ) : (
+                    <span>Sign In to Dashboard</span>
+                  )}
+                </button>
+              </form>
+
+              <div className="mt-5 text-center">
+                <button
+                  type="button"
+                  onClick={() => setIsRegisterMode(true)}
+                  className="text-xs text-orange-400 hover:text-orange-300 font-medium inline-flex items-center gap-1 transition-colors"
+                >
+                  <UserPlus className="w-3.5 h-3.5" />
+                  <span>Don't have an account? Request new user</span>
+                </button>
+              </div>
+
+              <div className="mt-6 pt-5 border-t border-zinc-800/80 text-center">
+                <p className="text-[11px] text-zinc-500 leading-tight">
+                  User roles (<code className="text-zinc-400">Admin</code> or <code className="text-zinc-400">Staff</code>) and account status are automatically identified upon login.
+                </p>
+              </div>
+            </>
+          ) : (
+            /* --- Request New User View --- */
+            <div className="space-y-4">
+              {regStatusMessage ? (
+                <div className="p-4 rounded-2xl bg-emerald-950/50 border border-emerald-800/60 text-emerald-200 text-xs space-y-3">
+                  <div className="flex items-center gap-2 font-bold text-sm text-emerald-300">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>Request Submitted to Google Sheet!</span>
+                  </div>
+                  <p className="leading-relaxed text-zinc-300">
+                    {regStatusMessage}
+                  </p>
+                  <div className="p-2.5 rounded-xl bg-zinc-900/80 border border-zinc-800 text-[11px] text-zinc-400 space-y-1">
+                    <p className="font-semibold text-zinc-300">Next Step for Administrator:</p>
+                    <p>Open your Google Sheet, find the <span className="text-white font-mono font-semibold">Users</span> tab, and change the <span className="text-emerald-400 font-mono font-semibold">active</span> column to <span className="text-emerald-400 font-mono font-semibold">true</span> for this user.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsRegisterMode(false);
+                      setRegStatusMessage(null);
+                    }}
+                    className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition-colors"
+                  >
+                    Proceed to Sign In
+                  </button>
+                </div>
+              ) : (
+                <form onSubmit={handleRequestNewUser} className="space-y-3.5">
+                  {!apiLink ? (
+                    <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs space-y-2.5">
+                      <div className="flex items-center gap-2 font-bold text-sm text-amber-400">
+                        <AlertTriangle className="w-4 h-4 shrink-0" />
+                        <span>Google Script URL Required</span>
+                      </div>
+                      <p className="text-zinc-300 leading-relaxed text-[11px]">
+                        User registration requests are synced directly to Google Sheets. Because no Script URL is configured yet, please sign in as <strong className="text-orange-300">admin</strong> / <strong className="text-orange-300">admin</strong> first, or set your Google Script URL above.
+                      </p>
+                      <div className="flex items-center gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => setShowScriptConfig(true)}
+                          className="px-3 py-1.5 rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-semibold text-xs transition-colors"
+                        >
+                          Set Script URL Now
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsRegisterMode(false);
+                            fillDefaultAdminCredentials();
+                          }}
+                          className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-medium text-xs transition-colors"
+                        >
+                          Sign In as Admin
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-3 rounded-2xl bg-zinc-950/60 border border-zinc-800/80 text-[11px] text-zinc-400 leading-relaxed flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 text-orange-400 shrink-0 mt-0.5" />
+                      <span>
+                        New user requests are sent directly to your Google Sheet <span className="text-white font-medium">Users</span> tab with status <span className="text-amber-400 font-medium">pending</span>. You will be able to log in once an admin activates your account.
+                      </span>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-400 uppercase tracking-wider mb-1">Full Name</label>
+                    <input 
+                      type="text" 
+                      value={regName}
+                      onChange={(e) => setRegName(e.target.value)}
+                      className="w-full bg-zinc-950/70 border border-zinc-700/80 rounded-xl px-3.5 py-2.5 text-sm text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-orange-500 transition-all"
+                      placeholder="e.g. John Doe"
+                      autoComplete="name"
+                      disabled={isSubmittingReg}
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-400 uppercase tracking-wider mb-1">Desired Username</label>
+                    <input 
+                      type="text" 
+                      value={regUsername}
+                      onChange={(e) => setRegUsername(e.target.value)}
+                      className="w-full bg-zinc-950/70 border border-zinc-700/80 rounded-xl px-3.5 py-2.5 text-sm text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-orange-500 transition-all"
+                      placeholder="e.g. jdoe"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      autoComplete="username"
+                      disabled={isSubmittingReg}
+                      required
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-400 uppercase tracking-wider mb-1">Password</label>
+                      <div className="relative">
+                        <input 
+                          type={showRegPassword ? 'text' : 'password'} 
+                          value={regPassword}
+                          onChange={(e) => setRegPassword(e.target.value)}
+                          className="w-full bg-zinc-950/70 border border-zinc-700/80 rounded-xl px-3.5 pr-9 py-2.5 text-sm text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-orange-500 transition-all"
+                          placeholder="Min. 6 chars"
+                          autoComplete="new-password"
+                          disabled={isSubmittingReg}
+                          required
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowRegPassword(!showRegPassword)}
+                          className="absolute inset-y-0 right-0 pr-2.5 flex items-center text-zinc-400 hover:text-white"
+                          tabIndex={-1}
+                          aria-label={showRegPassword ? 'Hide password' : 'Show password'}
+                        >
+                          {showRegPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-400 uppercase tracking-wider mb-1">Confirm</label>
+                      <div className="relative">
+                        <input 
+                          type={showRegConfirmPassword ? 'text' : 'password'} 
+                          value={regConfirmPassword}
+                          onChange={(e) => setRegConfirmPassword(e.target.value)}
+                          className="w-full bg-zinc-950/70 border border-zinc-700/80 rounded-xl px-3.5 pr-9 py-2.5 text-sm text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-orange-500 transition-all"
+                          placeholder="Re-enter password"
+                          autoComplete="new-password"
+                          disabled={isSubmittingReg}
+                          required
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowRegConfirmPassword(!showRegConfirmPassword)}
+                          className="absolute inset-y-0 right-0 pr-2.5 flex items-center text-zinc-400 hover:text-white"
+                          tabIndex={-1}
+                          aria-label={showRegConfirmPassword ? 'Hide password' : 'Show password'}
+                        >
+                          {showRegConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Real-time Password Strength and Validation Checklist */}
+                  {regPassword && (
+                    <PasswordStrengthMeter 
+                      password={regPassword} 
+                      username={regUsername} 
+                      confirmPassword={regConfirmPassword} 
+                    />
+                  )}
+
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-400 uppercase tracking-wider mb-1.5">Requested Role</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setRegRole('staff')}
+                        className={`flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs font-semibold transition-all border ${
+                          regRole === 'staff'
+                            ? 'bg-blue-600/20 text-blue-300 border-blue-500/50'
+                            : 'bg-zinc-950/50 text-zinc-400 border-zinc-800 hover:border-zinc-700'
+                        }`}
+                      >
+                        <UserCheck className="w-3.5 h-3.5" />
+                        <span>Staff Member</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRegRole('admin')}
+                        className={`flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs font-semibold transition-all border ${
+                          regRole === 'admin'
+                            ? 'bg-orange-600/20 text-orange-300 border-orange-500/50'
+                            : 'bg-zinc-950/50 text-zinc-400 border-zinc-800 hover:border-zinc-700'
+                        }`}
+                      >
+                        <ShieldCheck className="w-3.5 h-3.5" />
+                        <span>Administrator</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <button 
+                    type="submit"
+                    disabled={isSubmittingReg}
+                    className="w-full bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 text-white font-bold py-3.5 rounded-xl transition-all shadow-lg shadow-orange-500/25 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 mt-4"
+                  >
+                    {isSubmittingReg ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin text-white" />
+                        <span>Submitting Request to Google Sheet...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-4 h-4" />
+                        <span>Send Registration Request</span>
+                      </>
+                    )}
+                  </button>
+
+                  <div className="text-center pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsRegisterMode(false)}
+                      className="text-xs text-zinc-400 hover:text-white font-medium transition-colors"
+                    >
+                      Already have an account? Sign In
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          )}
         </motion.div>
+
+        {/* Global Toast Notification */}
+        <ToastNotification toast={toast} onDismiss={() => setToast(null)} />
       </div>
     );
   }
@@ -1300,11 +2393,36 @@ export default function App() {
         </motion.button>
 
         <div className="flex items-center gap-2">
+          {/* Active User role badge */}
+          <button
+            type="button"
+            onClick={() => {
+              setRoleChangeTarget(isAdmin ? 'staff' : 'admin');
+              setRoleChangeReason('');
+              setIsRoleChangeModalOpen(true);
+            }}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-zinc-900 hover:bg-zinc-850 border border-zinc-800 hover:border-zinc-700 text-xs shadow-sm transition-all group"
+            title="Click to request role change"
+          >
+            {isAdmin ? (
+              <ShieldCheck className="w-3.5 h-3.5 text-orange-400 group-hover:scale-110 transition-transform" />
+            ) : (
+              <UserCheck className="w-3.5 h-3.5 text-blue-400 group-hover:scale-110 transition-transform" />
+            )}
+            <span className="font-semibold text-zinc-200 hidden sm:inline max-w-[100px] truncate">
+              {authSession?.name || authSession?.username || (isAdmin ? 'Admin' : 'Staff')}
+            </span>
+            <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wider ${isAdmin ? 'bg-orange-500/20 text-orange-400' : 'bg-blue-500/20 text-blue-400'}`}>
+              {isAdmin ? 'Admin' : 'Staff'}
+            </span>
+          </button>
+
           {/* Active Tab indicator badge */}
-          <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 rounded-xl bg-zinc-900/80 border border-zinc-800 text-xs text-zinc-400">
+          <div className="hidden md:flex items-center gap-1.5 px-3 py-1 rounded-xl bg-zinc-900/80 border border-zinc-800 text-xs text-zinc-400">
             <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />
             <span className="font-medium text-zinc-300">{activeTab}</span>
           </div>
+
           <button 
             onClick={() => void syncWithGoogleSheets('manual')}
             disabled={isSyncing || !apiLink}
@@ -1314,8 +2432,20 @@ export default function App() {
             <RefreshCw className={`w-5 h-5 ${isSyncing ? 'animate-spin' : ''}`} />
           </button>
           <button 
-            onClick={() => setIsLoggedIn(false)}
-            className="p-2 hover:bg-zinc-800 rounded-full transition-colors text-zinc-400"
+            onClick={() => {
+              setCurrPassword('');
+              setNewPassword('');
+              setConfirmNewPassword('');
+              setIsChangePasswordModalOpen(true);
+            }}
+            className="p-2 hover:bg-zinc-800 hover:text-amber-400 rounded-full transition-colors text-zinc-400"
+            title="Change Account Password"
+          >
+            <Key className="w-5 h-5" />
+          </button>
+          <button 
+            onClick={() => handleLogout()}
+            className="p-2 hover:bg-zinc-800 hover:text-red-400 rounded-full transition-colors text-zinc-400"
             title="Logout"
           >
             <LogOut className="w-5 h-5" />
@@ -1386,25 +2516,61 @@ export default function App() {
             />
           )}
           {activeTab === 'Admin' && (
-            <AdminModule 
-              apiLink={apiLink} 
-              setApiLink={setApiLink} 
-              transactions={transactions} 
-              orders={orders} 
-              showToast={showToast}
-              isAdmin={isAdmin}
-              setIsAdmin={toggleAdmin}
-              resetSyncState={resetSyncState}
-              onGoogleSheetReset={handleGoogleSheetReset}
-              isSyncing={isSyncing}
-              onSync={() => syncWithGoogleSheets('manual')}
-              expenseCategories={expenseCategories}
-              onUpdateCategories={handleUpdateCategories}
-              paymentModes={paymentModes}
-              onUpdatePaymentModes={handleUpdatePaymentModes}
-              markSyncPending={markSyncPending}
-              onRefreshData={() => loadData()}
-            />
+            !isAdmin ? (
+              <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 text-center space-y-4 max-w-md mx-auto my-12 shadow-xl">
+                <div className="w-14 h-14 mx-auto rounded-2xl bg-orange-500/15 text-orange-400 border border-orange-500/30 flex items-center justify-center">
+                  <Lock className="w-7 h-7" />
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold text-white">Administrator Access Required</h3>
+                  <p className="text-xs text-zinc-400 mt-2 leading-relaxed">
+                    You are signed in as <span className="text-white font-semibold">{authSession?.name || authSession?.username}</span> (<span className="text-blue-400 font-semibold">Staff</span>). Admin settings, sync deployment links, and category management are restricted to Admin accounts.
+                  </p>
+                </div>
+                <div className="pt-2 flex flex-col sm:flex-row justify-center gap-3">
+                  <button
+                    onClick={() => handleLogout()}
+                    className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-orange-500 to-amber-500 text-white font-semibold text-xs hover:from-orange-600 hover:to-amber-600 transition-all shadow-md shadow-orange-500/20"
+                  >
+                    Switch / Sign In as Admin
+                  </button>
+                  <button
+                    onClick={() => navigateToTab('Dashboard')}
+                    className="px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-750 text-zinc-300 font-semibold text-xs transition-colors border border-zinc-700/60"
+                  >
+                    Return to Dashboard
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <AdminModule 
+                apiLink={apiLink} 
+                setApiLink={setApiLink} 
+                transactions={transactions} 
+                orders={orders} 
+                showToast={showToast}
+                isAdmin={isAdmin}
+                setIsAdmin={toggleAdmin}
+                resetSyncState={resetSyncState}
+                onGoogleSheetReset={handleGoogleSheetReset}
+                isSyncing={isSyncing}
+                onSync={() => syncWithGoogleSheets('manual')}
+                expenseCategories={expenseCategories}
+                onUpdateCategories={handleUpdateCategories}
+                paymentModes={paymentModes}
+                onUpdatePaymentModes={handleUpdatePaymentModes}
+                markSyncPending={markSyncPending}
+                onRefreshData={() => loadData()}
+                onOpenChangePassword={() => {
+                  setCurrPassword('');
+                  setNewPassword('');
+                  setConfirmNewPassword('');
+                  setIsChangePasswordModalOpen(true);
+                }}
+                authSession={authSession}
+                isOnline={isOnline}
+              />
+            )
           )}
         </AnimatePresence>
       </main>
@@ -1503,6 +2669,76 @@ export default function App() {
 
               {/* Navigation Items (Unified Vertical List with Staggered Cascading Animation) */}
               <div className="relative flex-1 overflow-y-auto px-3.5 py-4 space-y-1.5 no-scrollbar">
+                {/* User Session Profile Card */}
+                <div className="p-3 mb-3 rounded-2xl bg-zinc-950/70 border border-zinc-800/80 space-y-2.5 shadow-inner">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-sm shrink-0 ${
+                        isAdmin ? 'bg-orange-500/20 text-orange-400 border border-orange-500/30' : 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                      }`}>
+                        {isAdmin ? <ShieldCheck className="w-5 h-5" /> : <UserCheck className="w-5 h-5" />}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-white truncate">
+                          {authSession?.name || authSession?.username || (isAdmin ? 'Administrator' : 'Staff Member')}
+                        </p>
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wider ${
+                            isAdmin ? 'bg-orange-500/20 text-orange-400' : 'bg-blue-500/20 text-blue-400'
+                          }`}>
+                            {isAdmin ? 'Admin' : 'Staff'}
+                          </span>
+                          <span className="text-[10px] text-zinc-500 truncate">@{authSession?.username || 'user'}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsSidebarOpen(false);
+                        handleLogout();
+                      }}
+                      className="p-2 text-zinc-400 hover:text-red-400 hover:bg-zinc-800/80 rounded-xl transition-colors shrink-0"
+                      title="Sign Out"
+                    >
+                      <LogOut className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {/* Profile Actions: Change Password & Request Role Change */}
+                  <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCurrPassword('');
+                        setNewPassword('');
+                        setConfirmNewPassword('');
+                        setIsChangePasswordModalOpen(true);
+                        setIsSidebarOpen(false);
+                      }}
+                      className="flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-xl bg-zinc-900 hover:bg-zinc-850 border border-zinc-800 text-[11px] font-semibold text-zinc-300 hover:text-white transition-all shadow-sm"
+                      title="Change account password"
+                    >
+                      <Key className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Password</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRoleChangeTarget(isAdmin ? 'staff' : 'admin');
+                        setRoleChangeReason('');
+                        setIsRoleChangeModalOpen(true);
+                        setIsSidebarOpen(false);
+                      }}
+                      className="flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-xl bg-zinc-900 hover:bg-zinc-850 border border-zinc-800 text-[11px] font-semibold text-zinc-300 hover:text-white transition-all shadow-sm"
+                      title="Request role change"
+                    >
+                      <ArrowRightLeft className="w-3.5 h-3.5 text-orange-400" />
+                      <span>Role</span>
+                    </button>
+                  </div>
+                </div>
+
                 <div className="px-3 pb-2 text-[10px] font-bold text-zinc-500 uppercase tracking-widest flex items-center justify-between">
                   <span>Navigation Menu</span>
                   <span className="text-[9px] text-zinc-600 font-medium">KhataBook</span>
@@ -1514,9 +2750,16 @@ export default function App() {
                   { id: 'Orders', label: 'Orders', subtitle: 'Bills, Invoices & Quotations', icon: Package },
                   { id: 'Passbook', label: 'Passbook', subtitle: 'Account Statements', icon: History },
                   { id: 'Reports', label: 'Reports', subtitle: 'PDF Statements & Excel', icon: FileText },
-                  { id: 'Admin', label: 'Admin & Settings', subtitle: 'Google Sheet Sync & Backup', icon: Settings },
+                  { 
+                    id: 'Admin', 
+                    label: 'Admin & Settings', 
+                    subtitle: isAdmin ? 'Google Sheet Sync & Backup' : 'Locked (Admin only)', 
+                    icon: Settings,
+                    adminOnly: true
+                  },
                 ].map((item, idx) => {
                   const isActive = activeTab === item.id;
+                  const isLocked = item.adminOnly && !isAdmin;
                   const Icon = item.icon;
                   return (
                     <motion.button
@@ -1525,9 +2768,13 @@ export default function App() {
                       initial={{ opacity: 0, x: -20 }}
                       animate={{ opacity: 1, x: 0 }}
                       transition={{ delay: 0.035 * idx, type: 'spring', damping: 24, stiffness: 280 }}
-                      whileHover={{ x: 5 }}
+                      whileHover={{ x: isLocked ? 0 : 5 }}
                       whileTap={{ scale: 0.98 }}
                       onClick={() => {
+                        if (isLocked) {
+                          showToast('Admin & Settings is accessible only to Administrator accounts', 'error');
+                          return;
+                        }
                         if (item.id === 'Orders') {
                           setOrderInitialFilter('All');
                         }
@@ -1537,7 +2784,9 @@ export default function App() {
                       className={`w-full flex items-center gap-3.5 px-3.5 py-3 rounded-2xl text-left transition-all group relative overflow-hidden ${
                         isActive
                           ? 'bg-gradient-to-r from-orange-500/20 via-orange-500/10 to-transparent text-orange-400 border border-orange-500/35 shadow-sm'
-                          : 'text-zinc-300 hover:text-white hover:bg-zinc-800/60 border border-transparent'
+                          : isLocked
+                            ? 'text-zinc-500 hover:text-zinc-400 hover:bg-zinc-900/40 border border-transparent opacity-75'
+                            : 'text-zinc-300 hover:text-white hover:bg-zinc-800/60 border border-transparent'
                       }`}
                     >
                       {isActive && (
@@ -1551,7 +2800,9 @@ export default function App() {
                         className={`p-2.5 rounded-xl transition-all shrink-0 ${
                           isActive
                             ? 'bg-gradient-to-tr from-orange-600 to-amber-500 text-white shadow-md shadow-orange-500/30'
-                            : 'bg-zinc-800/80 text-zinc-400 group-hover:text-white group-hover:bg-zinc-750'
+                            : isLocked
+                              ? 'bg-zinc-850 text-zinc-500'
+                              : 'bg-zinc-800/80 text-zinc-400 group-hover:text-white group-hover:bg-zinc-750'
                         }`}
                       >
                         <Icon className="w-5 h-5" />
@@ -1563,17 +2814,22 @@ export default function App() {
                           {isActive && (
                             <span className="w-2 h-2 rounded-full bg-orange-500 shadow-sm shadow-orange-500" />
                           )}
+                          {isLocked && !isActive && (
+                            <Lock className="w-3.5 h-3.5 text-zinc-500" />
+                          )}
                         </div>
                         <p className="text-[11px] text-zinc-500 truncate mt-0.5">{item.subtitle}</p>
                       </div>
 
-                      <ChevronRight
-                        className={`w-4 h-4 transition-all ${
-                          isActive
-                            ? 'text-orange-400 translate-x-0'
-                            : 'text-zinc-600 opacity-0 -translate-x-1 group-hover:opacity-100 group-hover:translate-x-0'
-                        }`}
-                      />
+                      {!isLocked && (
+                        <ChevronRight
+                          className={`w-4 h-4 transition-all ${
+                            isActive
+                              ? 'text-orange-400 translate-x-0'
+                              : 'text-zinc-600 opacity-0 -translate-x-1 group-hover:opacity-100 group-hover:translate-x-0'
+                          }`}
+                        />
+                      )}
                     </motion.button>
                   );
                 })}
@@ -1600,11 +2856,398 @@ export default function App() {
           showToast={showToast}
         />
       )}
+
+      {/* Role Change Request Modal */}
+      <AnimatePresence>
+        {isRoleChangeModalOpen && (
+          <div className="fixed inset-0 z-[150] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsRoleChangeModalOpen(false)}
+              className="absolute inset-0 bg-black/80 backdrop-blur-sm cursor-pointer"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className="relative w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-3xl p-6 shadow-2xl z-10 space-y-4"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-10 h-10 rounded-2xl bg-orange-500/15 border border-orange-500/30 flex items-center justify-center text-orange-400">
+                    <ArrowRightLeft className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-base text-white">Request Role Change</h3>
+                    <p className="text-[11px] text-zinc-400">Submit role change request to Google Sheet</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsRoleChangeModalOpen(false)}
+                  className="p-1.5 text-zinc-400 hover:text-white rounded-xl hover:bg-zinc-800 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-3 rounded-2xl bg-zinc-950/60 border border-zinc-800 text-xs text-zinc-400 space-y-1">
+                <div className="text-zinc-300 font-semibold flex items-center gap-1.5">
+                  <span>Current Account:</span>
+                  <span className="text-white font-mono">@{authSession?.username}</span>
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${isAdmin ? 'bg-orange-500/20 text-orange-400' : 'bg-blue-500/20 text-blue-400'}`}>
+                    {isAdmin ? 'Admin' : 'Staff'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-zinc-500 leading-relaxed">
+                  Your request is recorded in the Google Sheet <span className="text-zinc-300">requested_role</span> column. When your administrator updates your role in the sheet, your app will immediately reflect it on the next sync.
+                </p>
+              </div>
+
+              <form onSubmit={handleRoleChangeRequest} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-medium text-zinc-400 uppercase tracking-wider mb-2">Select Target Role</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setRoleChangeTarget('staff')}
+                      className={`flex flex-col items-center gap-1.5 p-3 rounded-2xl border text-center transition-all ${
+                        roleChangeTarget === 'staff'
+                          ? 'bg-blue-600/20 text-blue-300 border-blue-500 shadow-sm'
+                          : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:border-zinc-700'
+                      }`}
+                    >
+                      <UserCheck className="w-5 h-5" />
+                      <div>
+                        <p className="text-xs font-bold text-white">Staff Member</p>
+                        <p className="text-[10px] text-zinc-400">Daily expenses & orders</p>
+                      </div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRoleChangeTarget('admin')}
+                      className={`flex flex-col items-center gap-1.5 p-3 rounded-2xl border text-center transition-all ${
+                        roleChangeTarget === 'admin'
+                          ? 'bg-orange-600/20 text-orange-300 border-orange-500 shadow-sm'
+                          : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:border-zinc-700'
+                      }`}
+                    >
+                      <ShieldCheck className="w-5 h-5" />
+                      <div>
+                        <p className="text-xs font-bold text-white">Administrator</p>
+                        <p className="text-[10px] text-zinc-400">Full system & sync control</p>
+                      </div>
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-zinc-400 uppercase tracking-wider mb-1.5">Reason / Note for Administrator (Optional)</label>
+                  <textarea
+                    rows={2}
+                    value={roleChangeReason}
+                    onChange={(e) => setRoleChangeReason(e.target.value)}
+                    placeholder="e.g. Need access to manage Google Sheets sync and categories"
+                    className="w-full bg-zinc-950/70 border border-zinc-700/80 rounded-xl px-3 py-2 text-xs text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-orange-500 transition-all resize-none"
+                    disabled={isSubmittingRoleChange}
+                  />
+                </div>
+
+                <div className="flex gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setIsRoleChangeModalOpen(false)}
+                    className="flex-1 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-750 text-zinc-300 font-semibold text-xs transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSubmittingRoleChange}
+                    className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 text-white font-semibold text-xs transition-all shadow-md shadow-orange-500/20 disabled:opacity-50 flex items-center justify-center gap-1.5"
+                  >
+                    {isSubmittingRoleChange ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Submitting...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-3.5 h-3.5" />
+                        <span>Send Request</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Change Password Modal */}
+      <AnimatePresence>
+        {isChangePasswordModalOpen && (
+          <div className="fixed inset-0 z-[150] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsChangePasswordModalOpen(false)}
+              className="absolute inset-0 bg-black/80 backdrop-blur-sm cursor-pointer"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className="relative w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-3xl p-6 shadow-2xl z-10 space-y-4"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-10 h-10 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400">
+                    <Key className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-base text-white">Change Account Password</h3>
+                    <p className="text-[11px] text-zinc-400">Set a unique & secure password</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsChangePasswordModalOpen(false)}
+                  className="p-1.5 text-zinc-400 hover:text-white rounded-xl hover:bg-zinc-800 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Informational banner explaining why Google Password Manager warns */}
+              <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/25 text-[11px] text-zinc-300 leading-relaxed space-y-1.5">
+                <div className="flex items-center gap-1.5 font-semibold text-amber-300">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+                  <span>Why Password Managers Give Warnings</span>
+                </div>
+                <p className="text-zinc-400">
+                  Default credentials like <code className="text-amber-300 bg-zinc-900 px-1 py-0.5 rounded">admin</code> exist on publicly leaked database breach lists across the web. Google Password Manager automatically warns users whenever a common or breached password is used.
+                </p>
+                <p className="text-zinc-400">
+                  Setting your own unique password here will secure your account and resolve the browser warning.
+                </p>
+              </div>
+
+              <form onSubmit={handleChangePassword} className="space-y-3.5">
+                <div>
+                  <label className="block text-xs font-medium text-zinc-400 uppercase tracking-wider mb-1">
+                    Current Password
+                  </label>
+                  <input
+                    type={showNewPassword ? 'text' : 'password'}
+                    value={currPassword}
+                    onChange={(e) => setCurrPassword(e.target.value)}
+                    placeholder="Enter current password"
+                    autoComplete="current-password"
+                    className="w-full bg-zinc-950/70 border border-zinc-700/80 rounded-xl px-3.5 py-2.5 text-sm text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-orange-500 transition-all"
+                    disabled={isChangingPassword}
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-zinc-400 uppercase tracking-wider mb-1">
+                    New Secure Password
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={showNewPassword ? 'text' : 'password'}
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      placeholder="Min. 6 chars (letters & numbers)"
+                      autoComplete="new-password"
+                      className="w-full bg-zinc-950/70 border border-zinc-700/80 rounded-xl px-3.5 pr-10 py-2.5 text-sm text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-orange-500 transition-all"
+                      disabled={isChangingPassword}
+                      required
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowNewPassword(!showNewPassword)}
+                      className="absolute inset-y-0 right-0 pr-3 flex items-center text-zinc-400 hover:text-white"
+                      tabIndex={-1}
+                      aria-label={showNewPassword ? 'Hide password' : 'Show password'}
+                    >
+                      {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-zinc-400 uppercase tracking-wider mb-1">
+                    Confirm New Password
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={showConfirmNewPassword ? 'text' : 'password'}
+                      value={confirmNewPassword}
+                      onChange={(e) => setConfirmNewPassword(e.target.value)}
+                      placeholder="Re-enter new password"
+                      autoComplete="new-password"
+                      className="w-full bg-zinc-950/70 border border-zinc-700/80 rounded-xl px-3.5 pr-10 py-2.5 text-sm text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-orange-500 transition-all"
+                      disabled={isChangingPassword}
+                      required
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowConfirmNewPassword(!showConfirmNewPassword)}
+                      className="absolute inset-y-0 right-0 pr-3 flex items-center text-zinc-400 hover:text-white"
+                      tabIndex={-1}
+                      aria-label={showConfirmNewPassword ? 'Hide password' : 'Show password'}
+                    >
+                      {showConfirmNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Real-time Password Strength and Validation Checklist */}
+                {newPassword && (
+                  <PasswordStrengthMeter
+                    password={newPassword}
+                    username={authSession?.username}
+                    confirmPassword={confirmNewPassword}
+                  />
+                )}
+
+                <div className="flex gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsChangePasswordModalOpen(false)}
+                    className="flex-1 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-750 text-zinc-300 font-semibold text-xs transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isChangingPassword}
+                    className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white font-semibold text-xs transition-all shadow-md shadow-orange-500/20 disabled:opacity-50 flex items-center justify-center gap-1.5"
+                  >
+                    {isChangingPassword ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Updating...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="w-3.5 h-3.5" />
+                        <span>Save Password</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Global Toast Notification */}
+      <ToastNotification toast={toast} onDismiss={() => setToast(null)} />
     </div>
   );
 }
 
 // --- Sub-Components ---
+
+function ToastNotification({ 
+  toast, 
+  onDismiss 
+}: { 
+  toast: { message: string; type: 'success' | 'error' | 'info' } | null; 
+  onDismiss: () => void; 
+}) {
+  return (
+    <AnimatePresence>
+      {toast && (
+        <motion.div
+          key="global-app-toast"
+          initial={{ opacity: 0, y: -28, scale: 0.92 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: -20, scale: 0.92 }}
+          transition={{ type: 'spring', stiffness: 500, damping: 32 }}
+          className="fixed top-5 left-1/2 -translate-x-1/2 z-[99999] w-[94vw] max-w-md px-2 pointer-events-none"
+        >
+          <div
+            onClick={onDismiss}
+            role="alert"
+            className={`pointer-events-auto relative overflow-hidden flex items-start gap-3 p-4 rounded-2xl shadow-2xl backdrop-blur-xl border cursor-pointer select-none transition-all group ${
+              toast.type === 'success'
+                ? 'bg-zinc-950/95 border-emerald-500/50 shadow-emerald-950/50 text-emerald-300'
+                : toast.type === 'error'
+                  ? 'bg-zinc-950/95 border-rose-500/50 shadow-rose-950/50 text-rose-300'
+                  : 'bg-zinc-950/95 border-amber-500/50 shadow-amber-950/50 text-amber-300'
+            }`}
+          >
+            <div className={`p-2 rounded-xl shrink-0 mt-0.5 ${
+              toast.type === 'success'
+                ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                : toast.type === 'error'
+                  ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+                  : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+            }`}>
+              {toast.type === 'success' && <CheckCircle2 className="w-5 h-5" />}
+              {toast.type === 'error' && <AlertCircle className="w-5 h-5" />}
+              {toast.type === 'info' && <AlertTriangle className="w-5 h-5" />}
+            </div>
+
+            <div className="flex-1 min-w-0 pr-1">
+              <div className="flex items-center gap-2 mb-1">
+                <span className={`text-[10px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md ${
+                  toast.type === 'success'
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    : toast.type === 'error'
+                      ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                      : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                }`}>
+                  {toast.type === 'success' ? 'Success' : toast.type === 'error' ? 'Error' : 'Notice'}
+                </span>
+                <span className="text-[10px] text-zinc-500 font-medium">Click to dismiss</span>
+              </div>
+              <p className="text-xs sm:text-sm font-semibold text-white leading-snug break-words">
+                {toast.message}
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDismiss();
+              }}
+              className="p-1.5 rounded-xl text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors shrink-0 -mr-1 -mt-1"
+              aria-label="Dismiss toast"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            {/* Subtle animated auto-dismiss progress bar */}
+            <motion.div
+              initial={{ scaleX: 1 }}
+              animate={{ scaleX: 0 }}
+              transition={{ duration: 4, ease: 'linear' }}
+              className={`absolute bottom-0 left-0 right-0 h-1 origin-left ${
+                toast.type === 'success'
+                  ? 'bg-emerald-500'
+                  : toast.type === 'error'
+                    ? 'bg-rose-500'
+                    : 'bg-amber-500'
+              }`}
+            />
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
 
 function Dashboard({ 
   stats, 
@@ -4931,13 +6574,167 @@ function AdminModule({
   paymentModes = DEFAULT_PAYMENT_MODES,
   onUpdatePaymentModes,
   markSyncPending,
-  onRefreshData
+  onRefreshData,
+  onOpenChangePassword,
+  authSession,
+  isOnline,
 }: any) {
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [showGoogleResetConfirm, setShowGoogleResetConfirm] = useState(false);
   const [showAppsScriptModal, setShowAppsScriptModal] = useState(false);
   const [isResettingGoogleSheet, setIsResettingGoogleSheet] = useState(false);
   const [syncButtonLabel, setSyncButtonLabel] = useState('Sync Data');
+  const [localUsersList, setLocalUsersList] = useState<RegisteredUser[]>(() => getRegisteredUsers());
+  const [isSyncingUsers, setIsSyncingUsers] = useState(false);
+  const [updatingUsername, setUpdatingUsername] = useState<string | null>(null);
+
+  // Sync registered users from Google Sheet to ensure approval status stays up-to-date
+  const syncUsersFromSheet = useCallback(async (notify = false) => {
+    if (!apiLink || !isOnline || !isAdmin || !authSession?.username) return;
+    setIsSyncingUsers(true);
+    try {
+      const res = await fetchUsersWithGoogleSheet(apiLink, authSession.username, authSession.password);
+      if (res.success && res.users) {
+        const currentLocal = getRegisteredUsers();
+        const localMap = new Map<string, RegisteredUser>();
+
+        currentLocal.forEach((u) => {
+          localMap.set(u.username.toLowerCase(), u);
+        });
+
+        // Merge Sheet users into local list
+        res.users.forEach((su) => {
+          const key = su.username.toLowerCase();
+          const existing = localMap.get(key);
+          const isAct = parseIsActive((su as any).active ?? (su as any).status);
+          localMap.set(key, {
+            username: su.username,
+            name: su.name || existing?.name || su.username,
+            password: existing?.password || '',
+            role: su.role,
+            active: isAct,
+            requestedAt: su.requested_at || existing?.requestedAt || new Date().toISOString(),
+          });
+        });
+
+        const mergedList = Array.from(localMap.values());
+        localStorage.setItem(LOCAL_USERS_KEY, JSON.stringify(mergedList));
+        setLocalUsersList(mergedList);
+        if (notify) {
+          showToast(`Synced ${res.users.length} user accounts from Google Sheet!`, 'success');
+        }
+      } else if (res.isScriptOutdated && notify) {
+        showToast('Update your Google Apps Script in Settings to sync users directly from Google Sheet', 'info');
+      }
+    } catch (err: any) {
+      console.warn('User accounts sync notice:', err);
+    } finally {
+      setIsSyncingUsers(false);
+    }
+  }, [apiLink, isOnline, isAdmin, authSession, showToast]);
+
+  useEffect(() => {
+    syncUsersFromSheet();
+  }, [syncUsersFromSheet]);
+
+  const handleToggleUserActive = async (username: string, active: boolean) => {
+    // 1. Immediate optimistic local update
+    updateRegisteredUserStatus(username, { active });
+    setLocalUsersList(getRegisteredUsers());
+    setUpdatingUsername(username);
+
+    // 2. Direct cloud update to Google Sheet
+    if (apiLink && isOnline && authSession?.username) {
+      try {
+        const res = await updateUserWithGoogleSheet(apiLink, {
+          adminUsername: authSession.username,
+          adminPassword: authSession.password,
+          targetUsername: username,
+          active: active,
+        });
+
+        if (res.success) {
+          showToast(`User @${username} is now ${active ? 'Active & Approved' : 'Disabled'} in Google Sheet!`, 'success');
+          await syncUsersFromSheet(false);
+        } else if (res.isScriptOutdated) {
+          showToast(
+            `User @${username} approved locally! To also sync approval to Google Sheet, update Google Apps Script.`,
+            'info'
+          );
+        } else {
+          showToast(res.message || `Could not update user in Google Sheet`, 'error');
+        }
+      } catch (err: any) {
+        showToast(`User updated locally (${err?.message || 'Network blip'})`, 'info');
+      } finally {
+        setUpdatingUsername(null);
+      }
+    } else {
+      showToast(`User @${username} is now ${active ? 'Active' : 'Disabled'} locally`, 'success');
+      setUpdatingUsername(null);
+    }
+  };
+
+  const handleToggleUserRole = async (username: string, role: 'admin' | 'staff') => {
+    updateRegisteredUserStatus(username, { role });
+    setLocalUsersList(getRegisteredUsers());
+    setUpdatingUsername(username);
+
+    if (apiLink && isOnline && authSession?.username) {
+      try {
+        const res = await updateUserWithGoogleSheet(apiLink, {
+          adminUsername: authSession.username,
+          adminPassword: authSession.password,
+          targetUsername: username,
+          role: role,
+        });
+
+        if (res.success) {
+          showToast(`User @${username} role updated to ${role} in Google Sheet!`, 'success');
+        } else if (res.isScriptOutdated) {
+          showToast(`User role updated locally. Update Apps Script to sync roles to Google Sheet.`, 'info');
+        } else {
+          showToast(res.message || `Failed to update user role in Google Sheet`, 'error');
+        }
+      } catch (err: any) {
+        showToast(`User role updated locally`, 'info');
+      } finally {
+        setUpdatingUsername(null);
+      }
+    } else {
+      showToast(`User @${username} role updated to ${role}`, 'success');
+      setUpdatingUsername(null);
+    }
+  };
+
+  const handleDeleteUser = async (username: string) => {
+    if (username.toLowerCase() === 'admin') {
+      showToast('The default administrator account cannot be deleted', 'error');
+      return;
+    }
+
+    deleteRegisteredUser(username);
+    setLocalUsersList(getRegisteredUsers());
+    setUpdatingUsername(username);
+
+    if (apiLink && isOnline && authSession?.username) {
+      try {
+        await deleteUserWithGoogleSheet(apiLink, {
+          adminUsername: authSession.username,
+          adminPassword: authSession.password,
+          targetUsername: username,
+        });
+        showToast(`User @${username} removed from app & Google Sheet`, 'info');
+      } catch (err: any) {
+        showToast(`User @${username} removed locally`, 'info');
+      } finally {
+        setUpdatingUsername(null);
+      }
+    } else {
+      showToast(`User @${username} removed`, 'info');
+      setUpdatingUsername(null);
+    }
+  };
 
   // Back button & gesture handlers for Admin
   useBackHandler(() => {
@@ -5023,24 +6820,193 @@ function AdminModule({
         
         <div className="space-y-10">
           {/* Admin Access Toggle */}
-          <div className="group flex items-center justify-between p-4 sm:p-6 bg-zinc-800/30 rounded-[32px] border border-zinc-800/50 hover:border-orange-500/30 transition-all gap-4">
+          {/* Authenticated Role Status */}
+          <div className="flex items-center justify-between p-4 sm:p-6 bg-zinc-800/30 rounded-[32px] border border-zinc-800/50 gap-4">
             <div className="flex-1">
-              <p className="font-bold text-base sm:text-lg mb-1">Admin Access</p>
-              <p className="text-[10px] sm:text-xs text-zinc-500 leading-relaxed max-w-[200px] sm:max-w-[240px]">
-                Enable restricted features like deleting orders with payment history.
+              <div className="flex items-center gap-2 mb-1">
+                <p className="font-bold text-base sm:text-lg">Administrator Privileges</p>
+                <span className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-orange-500/20 text-orange-400 border border-orange-500/30">
+                  Verified
+                </span>
+              </div>
+              <p className="text-[10px] sm:text-xs text-zinc-500 leading-relaxed max-w-[280px] sm:max-w-md">
+                Identified automatically from your account in the Google Sheet <span className="text-zinc-400 font-mono">Users</span> tab.
               </p>
             </div>
-            <button 
-              onClick={() => setIsAdmin(!isAdmin)}
-              className={`w-12 h-6 sm:w-14 sm:h-7 rounded-full transition-all relative flex items-center px-1 shrink-0 ${isAdmin ? 'bg-orange-500' : 'bg-zinc-700'}`}
+            <div className="w-10 h-10 rounded-2xl bg-orange-500/10 border border-orange-500/30 flex items-center justify-center text-orange-400 shrink-0">
+              <ShieldCheck className="w-5 h-5" />
+            </div>
+          </div>
+
+          {/* Account Password & Security */}
+          <div className="flex items-center justify-between p-4 sm:p-6 bg-zinc-800/30 rounded-[32px] border border-zinc-800/50 gap-4">
+            <div className="flex-1">
+              <div className="flex items-center gap-2 mb-1">
+                <p className="font-bold text-base sm:text-lg">Account Password & Security</p>
+                <span className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                  Security
+                </span>
+              </div>
+              <p className="text-[10px] sm:text-xs text-zinc-500 leading-relaxed max-w-[280px] sm:max-w-md">
+                Change your password from the default <span className="text-zinc-400 font-mono">admin</span> to prevent Google Password Manager breach warnings and secure your system.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onOpenChangePassword}
+              className="px-4 py-2.5 rounded-2xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 font-bold text-xs flex items-center gap-1.5 transition-all active:scale-95 shrink-0"
             >
-              <motion.div 
-                animate={{ x: isAdmin ? (window.innerWidth < 640 ? 24 : 28) : 0 }}
-                transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                className="w-4 h-4 sm:w-5 sm:h-5 bg-white rounded-full shadow-lg"
-              />
+              <Key className="w-4 h-4" />
+              <span>Change Password</span>
             </button>
           </div>
+
+          {/* User Accounts & Registration Approvals (strictly restricted to Administrator) */}
+          {isAdmin && (
+            <div className="p-4 sm:p-6 bg-zinc-800/30 rounded-[32px] border border-zinc-800/50 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
+                    <p className="font-bold text-base sm:text-lg">User Accounts & Approvals</p>
+                    <span className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-blue-500/20 text-blue-400 border border-blue-500/30">
+                      {localUsersList.length} User{localUsersList.length === 1 ? '' : 's'}
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-orange-500/20 text-orange-400 border border-orange-500/30">
+                      Admin Only
+                    </span>
+                  </div>
+                  <p className="text-[10px] sm:text-xs text-zinc-500 leading-relaxed">
+                    Manage registered users and instantly activate accounts requested from the login screen.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {apiLink && (
+                    <button
+                      type="button"
+                      onClick={() => syncUsersFromSheet(true)}
+                      disabled={isSyncingUsers || !isOnline}
+                      className="px-3 py-1.5 rounded-xl bg-zinc-800/90 hover:bg-zinc-750 text-zinc-300 hover:text-white text-xs font-medium border border-zinc-700/60 transition-all flex items-center gap-1.5 disabled:opacity-50"
+                      title="Sync and refresh user list directly from Google Sheet"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 text-blue-400 ${isSyncingUsers ? 'animate-spin' : ''}`} />
+                      <span>{isSyncingUsers ? 'Syncing...' : 'Sync with Sheet'}</span>
+                    </button>
+                  )}
+                  <div className="w-9 h-9 rounded-2xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400 shrink-0">
+                    <UserCheck className="w-4 h-4" />
+                  </div>
+                </div>
+              </div>
+
+              {localUsersList.length === 0 ? (
+                <div className="p-4 rounded-2xl bg-zinc-900/60 border border-zinc-800 text-center text-xs text-zinc-500">
+                  No user registration requests recorded yet. When users submit "Request New User" from the login screen, they will appear here for instant approval.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {localUsersList.map((u) => {
+                    const isBusy = updatingUsername === u.username;
+                    return (
+                      <div
+                        key={u.username}
+                        className="p-3 sm:p-4 rounded-2xl bg-zinc-900/80 border border-zinc-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-all hover:border-zinc-700"
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-bold text-sm text-white truncate">{u.name}</span>
+                            <span className="text-xs text-zinc-400 font-mono truncate">@{u.username}</span>
+                            <span
+                              className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wider ${
+                                u.role === 'admin'
+                                  ? 'bg-orange-500/20 text-orange-400 border border-orange-500/30'
+                                  : 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                              }`}
+                            >
+                              {u.role}
+                            </span>
+                            <span
+                              className={`text-[9px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider flex items-center gap-1.5 ${
+                                u.active
+                                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                                  : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                              }`}
+                            >
+                              <span className={`w-1.5 h-1.5 rounded-full ${u.active ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'}`} />
+                              <span>{u.active ? 'Active' : 'Pending Approval'}</span>
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-zinc-500 mt-1">
+                            Requested: {format(parseISO(u.requestedAt), 'dd MMM yyyy, hh:mm a')}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          {!u.active ? (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleUserActive(u.username, true)}
+                              disabled={isBusy}
+                              className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-800 text-white text-xs font-semibold shadow-md shadow-emerald-900/30 transition-all active:scale-95 flex items-center gap-1.5 disabled:cursor-not-allowed"
+                            >
+                              {isBusy ? (
+                                <>
+                                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                  <span>Activating...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Check className="w-3.5 h-3.5" />
+                                  <span>Approve & Activate</span>
+                                </>
+                              )}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleUserActive(u.username, false)}
+                              disabled={isBusy}
+                              className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium transition-colors flex items-center gap-1.5 disabled:opacity-60"
+                            >
+                              {isBusy ? (
+                                <>
+                                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                  <span>Updating...</span>
+                                </>
+                              ) : (
+                                <span>Deactivate</span>
+                              )}
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() => handleToggleUserRole(u.username, u.role === 'admin' ? 'staff' : 'admin')}
+                            disabled={isBusy}
+                            className="px-2.5 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white text-xs transition-colors disabled:opacity-60"
+                            title={u.role === 'admin' ? 'Change to Staff' : 'Make Administrator'}
+                          >
+                            {u.role === 'admin' ? 'Make Staff' : 'Make Admin'}
+                          </button>
+
+                          {u.username.toLowerCase() !== 'admin' && (
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteUser(u.username)}
+                              disabled={isBusy}
+                              className="p-1.5 rounded-xl text-zinc-500 hover:text-red-400 hover:bg-zinc-800 transition-colors disabled:opacity-60"
+                              title="Remove user"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* API Link Section */}
           <div className="space-y-4">

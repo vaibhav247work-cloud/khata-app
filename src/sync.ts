@@ -89,7 +89,7 @@ const requestJson = async (
       }
 
       const payload = await response.json();
-      if (payload?.error || payload?.success === false) {
+      if (payload?.error) {
         const errorText = String(payload.error || '');
         // If Google Sheets lock contention or script busy, retry automatically
         if ((errorText.includes('timed out') || errorText.includes('busy') || errorText.includes('Lock')) && attempt < maxRetries) {
@@ -98,7 +98,7 @@ const requestJson = async (
           await new Promise((r) => setTimeout(r, delay));
           continue;
         }
-        throw new Error(payload.error || 'Google Sheets rejected the request');
+        throw new Error(payload.error);
       }
 
       return payload;
@@ -511,7 +511,430 @@ export const syncPaymentModesWithGoogleSheets = async (apiLink: string) => {
   }
 };
 
-export const syncLocalAndGoogleSheets = async (apiLink: string) => {
+export interface UserAuthVerificationResult {
+  authenticated: boolean;
+  isPending?: boolean;
+  user?: {
+    username: string;
+    role: 'admin' | 'staff';
+    name: string;
+    active: boolean;
+    requested_role?: string;
+  };
+  message?: string;
+}
+
+export const parseIsActive = (val: any): boolean => {
+  if (val === true || val === 1) return true;
+  if (val === false || val === 0 || val === null || val === undefined) return false;
+  const str = String(val).trim().toLowerCase();
+  return (
+    str === 'true' ||
+    str === '1' ||
+    str === 'yes' ||
+    str === 'y' ||
+    str === 'approved' ||
+    str === 'approve' ||
+    str === 'active' ||
+    str === 'ok' ||
+    str === 'enabled' ||
+    str === 'allowed'
+  );
+};
+
+export const verifyUserWithGoogleSheet = async (
+  apiLink: string,
+  username: string,
+  password: string
+): Promise<UserAuthVerificationResult> => {
+  if (!apiLink || !apiLink.trim()) {
+    throw new Error('Google Apps Script URL is not configured');
+  }
+
+  const res = await requestJson(apiLink, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'text/plain;charset=utf-8',
+    },
+    body: JSON.stringify({
+      action: 'verifyUser',
+      username,
+      password,
+    }),
+  });
+
+  return {
+    authenticated: Boolean(res?.authenticated),
+    isPending: Boolean(res?.isPending),
+    user: res?.user,
+    message: res?.message,
+  };
+};
+
+export interface RequestNewUserParams {
+  username: string;
+  password: string;
+  name: string;
+  role?: 'staff' | 'admin';
+}
+
+export interface RequestNewUserResult {
+  success: boolean;
+  message: string;
+  username?: string;
+  isScriptOutdated?: boolean;
+}
+
+export const requestNewUserWithGoogleSheet = async (
+  apiLink: string,
+  params: RequestNewUserParams
+): Promise<RequestNewUserResult> => {
+  if (!apiLink || !apiLink.trim()) {
+    throw new Error('Google Apps Script URL is not configured in the app.');
+  }
+
+  try {
+    const res = await requestJson(apiLink, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8',
+      },
+      body: JSON.stringify({
+        action: 'requestUser',
+        username: params.username.trim(),
+        password: params.password,
+        name: params.name.trim(),
+        role: params.role || 'staff',
+      }),
+    });
+
+    if (res?.error) {
+      const errStr = String(res.error);
+      if (errStr.includes('Invalid action') || errStr.includes('Invalid sheet')) {
+        return {
+          success: false,
+          isScriptOutdated: true,
+          message: 'Google Apps Script in your spreadsheet needs to be updated to support cloud registrations. Update the script from Admin Settings -> Apps Script.',
+        };
+      }
+      return {
+        success: false,
+        message: errStr,
+      };
+    }
+
+    return {
+      success: Boolean(res?.success),
+      message: String(res?.message || (res?.success ? 'User registration request submitted to Google Sheet!' : 'Registration failed')),
+      username: res?.username,
+    };
+  } catch (err: any) {
+    const errMsg = String(err?.message || err || '');
+    if (errMsg.includes('Invalid action') || errMsg.includes('Invalid sheet') || errMsg.includes('is not valid JSON')) {
+      return {
+        success: false,
+        isScriptOutdated: true,
+        message: 'Google Apps Script in your spreadsheet needs to be updated to support cloud user registrations. Copy and deploy the latest code from Admin Settings.',
+      };
+    }
+    return {
+      success: false,
+      message: errMsg || 'Failed to submit registration request',
+    };
+  }
+};
+
+export interface RequestRoleChangeParams {
+  username: string;
+  password?: string;
+  targetRole: 'admin' | 'staff';
+  reason?: string;
+}
+
+export interface RequestRoleChangeResult {
+  success: boolean;
+  message: string;
+  targetRole?: string;
+}
+
+export const requestRoleChangeWithGoogleSheet = async (
+  apiLink: string,
+  params: RequestRoleChangeParams
+): Promise<RequestRoleChangeResult> => {
+  if (!apiLink || !apiLink.trim()) {
+    throw new Error('Google Apps Script URL is not configured.');
+  }
+
+  const res = await requestJson(apiLink, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'text/plain;charset=utf-8',
+    },
+    body: JSON.stringify({
+      action: 'requestRoleChange',
+      username: params.username,
+      password: params.password || '',
+      targetRole: params.targetRole,
+      reason: params.reason || '',
+    }),
+  });
+
+  return {
+    success: Boolean(res?.success),
+    message: String(res?.message || (res?.success ? 'Role change request submitted' : 'Role change request failed')),
+    targetRole: res?.targetRole,
+  };
+};
+
+export interface ChangePasswordParams {
+  username: string;
+  oldPassword?: string;
+  newPassword: string;
+}
+
+export interface ChangePasswordResult {
+  success: boolean;
+  message: string;
+}
+
+export const changeUserPasswordWithGoogleSheet = async (
+  apiLink: string,
+  params: ChangePasswordParams
+): Promise<ChangePasswordResult> => {
+  if (!apiLink || !apiLink.trim()) {
+    throw new Error('Google Apps Script URL is not configured.');
+  }
+
+  const res = await requestJson(apiLink, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'text/plain;charset=utf-8',
+    },
+    body: JSON.stringify({
+      action: 'changePassword',
+      username: params.username,
+      oldPassword: params.oldPassword || '',
+      newPassword: params.newPassword,
+    }),
+  });
+
+  return {
+    success: Boolean(res?.success),
+    message: String(res?.message || (res?.success ? 'Password updated successfully' : 'Failed to update password')),
+  };
+};
+
+export interface SheetUserItem {
+  username: string;
+  name: string;
+  role: 'admin' | 'staff';
+  active: boolean;
+  requested_role?: string;
+  requested_at?: string;
+}
+
+export const fetchUsersWithGoogleSheet = async (
+  apiLink: string,
+  adminUsername: string,
+  adminPassword?: string
+): Promise<{ success: boolean; users?: SheetUserItem[]; isScriptOutdated?: boolean; error?: string }> => {
+  if (!apiLink || !apiLink.trim()) {
+    throw new Error('Google Apps Script URL is not configured.');
+  }
+
+  try {
+    const res = await requestJson(apiLink, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8',
+      },
+      body: JSON.stringify({
+        action: 'getUsers',
+        adminUsername: adminUsername.trim(),
+        adminPassword: adminPassword || '',
+      }),
+    });
+
+    if (res?.error) {
+      const errStr = String(res.error);
+      if (errStr.includes('Invalid action')) {
+        return {
+          success: false,
+          isScriptOutdated: true,
+          error: 'Google Apps Script needs to be updated to support cloud user sync.',
+        };
+      }
+      return { success: false, error: errStr };
+    }
+
+    const rawUsers = Array.isArray(res?.users) ? res.users : [];
+    const normalizedUsers: SheetUserItem[] = rawUsers.map((u: any) => ({
+      username: String(u.username || '').trim(),
+      name: String(u.name || u.username || '').trim(),
+      role: String(u.role || '').toLowerCase().trim() === 'admin' ? 'admin' : 'staff',
+      active: parseIsActive(u.active ?? u.status),
+      requested_role: u.requested_role ? String(u.requested_role).trim() : undefined,
+      requested_at: u.requested_at ? String(u.requested_at).trim() : undefined,
+    }));
+
+    return {
+      success: true,
+      users: normalizedUsers,
+    };
+  } catch (err: any) {
+    const errMsg = String(err?.message || err || '');
+    if (errMsg.includes('Invalid action')) {
+      return {
+        success: false,
+        isScriptOutdated: true,
+        error: 'Google Apps Script needs to be updated to support cloud user sync.',
+      };
+    }
+    return {
+      success: false,
+      error: errMsg || 'Failed to fetch users from Google Sheet',
+    };
+  }
+};
+
+export const updateUserWithGoogleSheet = async (
+  apiLink: string,
+  params: {
+    adminUsername: string;
+    adminPassword?: string;
+    targetUsername: string;
+    active?: boolean;
+    role?: 'admin' | 'staff';
+  }
+): Promise<{ success: boolean; message: string; isScriptOutdated?: boolean }> => {
+  if (!apiLink || !apiLink.trim()) {
+    throw new Error('Google Apps Script URL is not configured.');
+  }
+
+  try {
+    const res = await requestJson(apiLink, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8',
+      },
+      body: JSON.stringify({
+        action: 'updateUser',
+        adminUsername: params.adminUsername.trim(),
+        adminPassword: params.adminPassword || '',
+        targetUsername: params.targetUsername.trim(),
+        active: params.active,
+        role: params.role,
+      }),
+    });
+
+    if (res?.error) {
+      const errStr = String(res.error);
+      if (errStr.includes('Invalid action')) {
+        return {
+          success: false,
+          isScriptOutdated: true,
+          message: 'Google Apps Script in your spreadsheet needs to be updated to support user activation directly from the app.',
+        };
+      }
+      return { success: false, message: errStr };
+    }
+
+    return {
+      success: Boolean(res?.success),
+      message: String(res?.message || 'User updated successfully in Google Sheet'),
+    };
+  } catch (err: any) {
+    const errMsg = String(err?.message || err || '');
+    if (errMsg.includes('Invalid action')) {
+      return {
+        success: false,
+        isScriptOutdated: true,
+        message: 'Google Apps Script in your spreadsheet needs to be updated to support cloud user activation.',
+      };
+    }
+    return {
+      success: false,
+      message: errMsg || 'Failed to update user in Google Sheet',
+    };
+  }
+};
+
+export const deleteUserWithGoogleSheet = async (
+  apiLink: string,
+  params: {
+    adminUsername: string;
+    adminPassword?: string;
+    targetUsername: string;
+  }
+): Promise<{ success: boolean; message: string }> => {
+  if (!apiLink || !apiLink.trim()) {
+    throw new Error('Google Apps Script URL is not configured.');
+  }
+
+  const res = await requestJson(apiLink, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'text/plain;charset=utf-8',
+    },
+    body: JSON.stringify({
+      action: 'deleteUser',
+      adminUsername: params.adminUsername.trim(),
+      adminPassword: params.adminPassword || '',
+      targetUsername: params.targetUsername.trim(),
+    }),
+  });
+
+  return {
+    success: Boolean(res?.success),
+    message: String(res?.message || 'User deleted from Google Sheet'),
+  };
+};
+
+export interface SyncResult {
+  authRevoked?: boolean;
+  authReason?: string;
+  userUpdate?: {
+    username: string;
+    role: 'admin' | 'staff';
+    name: string;
+  };
+}
+
+export const syncLocalAndGoogleSheets = async (
+  apiLink: string,
+  currentUserAuth?: { username: string; password: string }
+): Promise<SyncResult> => {
+  const result: SyncResult = {};
+
+  // If user credentials are provided and apiLink is set, verify against Google Sheets
+  if (currentUserAuth && currentUserAuth.username && apiLink) {
+    try {
+      const authCheck = await verifyUserWithGoogleSheet(
+        apiLink,
+        currentUserAuth.username,
+        currentUserAuth.password
+      );
+
+      if (!authCheck.authenticated) {
+        // User credentials changed in sheet, account deactivated or deleted -> revoke session
+        return {
+          authRevoked: true,
+          authReason: authCheck.message || 'Credentials or access updated in Google Sheet',
+        };
+      }
+
+      if (authCheck.user) {
+        result.userUpdate = {
+          username: authCheck.user.username,
+          role: authCheck.user.role,
+          name: authCheck.user.name,
+        };
+      }
+    } catch (authErr: any) {
+      console.warn('Auth verification against Google Sheet deferred (offline/network):', authErr?.message || authErr);
+    }
+  }
+
   await pushLocalDataToGoogleSheets(apiLink);
   await pullOnlineDataIntoLocalDb(apiLink);
   await markAllLocalDataSynced();
@@ -519,6 +942,8 @@ export const syncLocalAndGoogleSheets = async (apiLink: string) => {
   // Sync custom Expense Categories and Payment Modes with Google Sheets
   await syncCategoriesWithGoogleSheets(apiLink);
   await syncPaymentModesWithGoogleSheets(apiLink);
+
+  return result;
 };
 
 export const markAllLocalDataSynced = async () => {
