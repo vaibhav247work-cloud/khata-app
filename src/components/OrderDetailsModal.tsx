@@ -13,13 +13,15 @@ import {
   RefreshCw,
   ExternalLink,
   ChevronRight,
-  Trash2
+  Trash2,
+  Share2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format, parseISO, startOfDay, differenceInCalendarDays } from 'date-fns';
 import { type Order, type OrderItem } from '../db';
 import { OrderHistorySection } from './OrderHistorySection';
 import { useBackHandler } from '../utils/backHandler';
+import { shareToWhatsApp, generateOrderWhatsAppReminder, generateOrderWhatsAppReceipt } from '../utils/whatsappReminders';
 
 interface OrderDetailsModalProps {
   order: Order | null;
@@ -126,6 +128,28 @@ export const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
           {/* Top Quick Actions */}
           <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+            {/* WhatsApp Reminder or Receipt */}
+            <button
+              id={`details-whatsapp-btn-${order.order_id}`}
+              type="button"
+              onClick={async () => {
+                const isPending = order.status !== 'Completed' && Number(order.remaining_amount) > 0;
+                const text = isPending 
+                  ? generateOrderWhatsAppReminder(order, isOverdue ? daysPending : undefined)
+                  : generateOrderWhatsAppReceipt(order);
+                await shareToWhatsApp(text);
+                showToast?.(
+                  isPending 
+                    ? 'Payment reminder formatted & opened in WhatsApp!' 
+                    : 'Order receipt formatted & opened in WhatsApp!', 
+                  'success'
+                );
+              }}
+              className="p-2 sm:p-2.5 rounded-xl sm:rounded-2xl bg-emerald-950/60 hover:bg-emerald-900/80 text-emerald-400 border border-emerald-700/50 transition-colors cursor-pointer"
+              title={order.status === 'Completed' ? "Share Receipt on WhatsApp" : "Send WhatsApp Payment Reminder"}
+            >
+              <Share2 className="w-4 h-4" />
+            </button>
             <button
               id={`details-print-btn-${order.order_id}`}
               type="button"

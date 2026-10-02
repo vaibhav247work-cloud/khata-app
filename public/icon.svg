@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <rect width="512" height="512" rx="112" fill="#09090b"/>
+  <rect x="24" y="24" width="464" height="464" rx="88" stroke="#f97316" stroke-width="8" stroke-opacity="0.3"/>
+  <!-- Book spine / spine highlight -->
+  <path d="M120 96C106.745 96 96 106.745 96 120V392C96 405.255 106.745 416 120 416H392C405.255 416 416 405.255 416 392V120C416 106.745 405.255 96 392 96H120Z" fill="#18181b" stroke="#27272a" stroke-width="12"/>
+  <rect x="96" y="96" width="36" height="320" rx="12" fill="#f97316"/>
+  <!-- Ledger lines -->
+  <line x1="172" y1="160" x2="368" y2="160" stroke="#f97316" stroke-width="16" stroke-linecap="round"/>
+  <line x1="172" y1="220" x2="330" y2="220" stroke="#3f3f46" stroke-width="12" stroke-linecap="round"/>
+  <line x1="172" y1="270" x2="350" y2="270" stroke="#3f3f46" stroke-width="12" stroke-linecap="round"/>
+  <line x1="172" y1="320" x2="280" y2="320" stroke="#3f3f46" stroke-width="12" stroke-linecap="round"/>
+  <!-- Indian Rupee Badge -->
+  <circle cx="340" cy="330" r="54" fill="#f97316" filter="drop-shadow(0 8px 16px rgba(249, 115, 22, 0.4))"/>
+  <path d="M322 308H358M322 319H358M332 308V352M332 331C342 331 348 326 348 319.5C348 313 342 308 332 308M332 331L352 352" stroke="#ffffff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
