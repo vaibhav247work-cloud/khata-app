@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { Search, X, Printer, RefreshCw } from 'lucide-react';
 import { 
@@ -102,6 +102,37 @@ export function PassbookModule({
 
     return [...filtered].reverse(); // Show newest first
   }, [dateFilteredData, typeFilter, passbookSearch]);
+
+  // Progressive Lazy Loading (Virtual Pagination to prevent system freeze on large datasets)
+  const PAGE_SIZE = 35;
+  const [displayLimit, setDisplayLimit] = useState(PAGE_SIZE);
+  const loadMoreSentinelRef = useRef<HTMLDivElement>(null);
+
+  // Reset pagination limit when search, type filter, or date filter changes
+  useEffect(() => {
+    setDisplayLimit(PAGE_SIZE);
+  }, [passbookSearch, typeFilter, filterDate, customDateRange]);
+
+  const visiblePassbookData = useMemo(() => {
+    return passbookData.slice(0, displayLimit);
+  }, [passbookData, displayLimit]);
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && displayLimit < passbookData.length) {
+          setDisplayLimit((prev) => Math.min(prev + PAGE_SIZE, passbookData.length));
+        }
+      },
+      { threshold: 0.1, rootMargin: '300px' }
+    );
+
+    const target = loadMoreSentinelRef.current;
+    if (target) observer.observe(target);
+    return () => {
+      if (target) observer.unobserve(target);
+    };
+  }, [displayLimit, passbookData.length]);
 
   // Derive Period Label
   const periodLabel = useMemo(() => {
@@ -288,7 +319,7 @@ export function PassbookModule({
         </div>
 
         <div className="divide-y divide-zinc-800/70">
-          {passbookData.map((item: any) => {
+          {visiblePassbookData.map((item: any) => {
             const isCredit = item.type === 'Credit';
             return (
               <div key={item.id} className="grid grid-cols-12 p-4 items-center hover:bg-zinc-850/40 transition-colors">
@@ -336,6 +367,34 @@ export function PassbookModule({
               </div>
             );
           })}
+
+          {/* Progressive Infinite Scroll Sentinel & Load More button */}
+          {passbookData.length > displayLimit && (
+            <div 
+              ref={loadMoreSentinelRef} 
+              className="p-4 text-center border-t border-zinc-800/70 bg-zinc-950/40"
+            >
+              <div className="flex flex-col sm:flex-row items-center justify-center gap-2.5">
+                <div className="flex items-center gap-2 text-zinc-400 text-xs font-medium">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-orange-500" />
+                  <span>Showing {visiblePassbookData.length} of {passbookData.length} entries</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDisplayLimit((prev) => Math.min(prev + PAGE_SIZE * 2, passbookData.length))}
+                  className="px-3.5 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-750 text-xs font-semibold text-zinc-200 hover:text-white transition-colors border border-zinc-700/60 cursor-pointer shadow-xs active:scale-95"
+                >
+                  Load Next 70
+                </button>
+              </div>
+            </div>
+          )}
+
+          {passbookData.length > PAGE_SIZE && visiblePassbookData.length >= passbookData.length && (
+            <div className="p-3 text-center border-t border-zinc-800/50 bg-zinc-950/30 text-zinc-500 text-xs font-medium">
+              ✓ All {passbookData.length} transactions loaded for this period
+            </div>
+          )}
 
           {passbookData.length === 0 && (
             <div className="p-12 text-center space-y-3">

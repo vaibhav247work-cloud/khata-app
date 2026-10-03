@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { ChevronUp, ChevronDown } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
 import { 
@@ -30,6 +30,29 @@ export function ReportIncomeTab({
   const [activeIncomeCatIndex, setActiveIncomeCatIndex] = useState<number | null>(null);
   const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
 
+  // Group into Top 5 + Others for clean, non-collapsing donut chart
+  const chartData = useMemo(() => {
+    if (creditCategoryData.length <= 6) {
+      return creditCategoryData.map((d, i) => ({ ...d, colorIndex: i }));
+    }
+    const top5 = creditCategoryData.slice(0, 5).map((d, i) => ({ ...d, colorIndex: i }));
+    const others = creditCategoryData.slice(5);
+    const othersTotal = others.reduce((s, d) => s + d.value, 0);
+    const othersCount = others.reduce((s, d) => s + d.count, 0);
+    top5.push({
+      name: 'इतर स्रोत (Others)',
+      value: othersTotal,
+      count: othersCount,
+      percentage: totalCredit > 0 ? (othersTotal / totalCredit) * 100 : 0,
+      colorIndex: 5,
+    });
+    return top5;
+  }, [creditCategoryData, totalCredit]);
+
+  const activeCategory = activeIncomeCatIndex !== null && chartData[activeIncomeCatIndex]
+    ? chartData[activeIncomeCatIndex]
+    : null;
+
   return (
     <div className="space-y-6">
       <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-6">
@@ -54,33 +77,34 @@ export function ReportIncomeTab({
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-12 gap-8 items-start">
             <div className="md:col-span-5 flex items-center justify-center sticky top-4">
-              <div className="w-56 h-56 relative">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
+              <div className="w-56 h-56 relative flex items-center justify-center">
+                <ResponsiveContainer width="100%" height="100%" minWidth={190} minHeight={190}>
+                  <PieChart width={224} height={224}>
                     <Pie
-                      data={creditCategoryData}
+                      data={chartData}
                       cx="50%"
                       cy="50%"
                       innerRadius={58}
                       outerRadius={82}
-                      paddingAngle={3}
+                      paddingAngle={chartData.length > 1 ? 2 : 0}
+                      minAngle={4}
                       dataKey="value"
                       stroke="#18181b"
-                      strokeWidth={2}
-                      activeIndex={activeIncomeCatIndex !== null ? activeIncomeCatIndex : undefined}
+                      strokeWidth={chartData.length > 1 ? 2 : 0}
+                      activeIndex={activeIncomeCatIndex !== null && activeIncomeCatIndex < chartData.length ? activeIncomeCatIndex : undefined}
                       activeShape={renderReportActiveShape}
                       onMouseEnter={(_, index) => setActiveIncomeCatIndex(index)}
                       onMouseLeave={() => setActiveIncomeCatIndex(null)}
                       onClick={(_, index) => {
                         setActiveIncomeCatIndex(prev => prev === index ? null : index);
-                        const cat = creditCategoryData[index];
-                        if (cat) {
+                        const cat = chartData[index];
+                        if (cat && !cat.name.includes('इतर स्रोत')) {
                           setExpandedCategory(prev => prev === cat.name ? null : cat.name);
                         }
                       }}
                     >
-                      {creditCategoryData.map((_entry, index) => (
-                        <Cell key={`rep-cr-cell-${index}`} fill={EXPENSE_PALETTE[(index + 3) % EXPENSE_PALETTE.length]} />
+                      {chartData.map((entry, index) => (
+                        <Cell key={`rep-cr-cell-${index}`} fill={EXPENSE_PALETTE[(entry.colorIndex + 3) % EXPENSE_PALETTE.length]} />
                       ))}
                     </Pie>
                     <Tooltip
@@ -101,38 +125,35 @@ export function ReportIncomeTab({
                     />
                   </PieChart>
                 </ResponsiveContainer>
-                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none text-center p-2 transition-all">
-                  {activeIncomeCatIndex !== null && creditCategoryData[activeIncomeCatIndex] ? (
-                    <>
+                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none text-center px-2 py-1 transition-all">
+                  {activeCategory ? (
+                    <div className="flex flex-col items-center justify-center max-w-[110px]">
                       <span 
-                        className="text-[10px] uppercase font-bold tracking-wider truncate max-w-[130px] px-2 py-0.5 rounded-full border mb-0.5"
-                        style={{ 
-                          color: EXPENSE_PALETTE[(activeIncomeCatIndex + 3) % EXPENSE_PALETTE.length],
-                          borderColor: `${EXPENSE_PALETTE[(activeIncomeCatIndex + 3) % EXPENSE_PALETTE.length]}40`,
-                          backgroundColor: `${EXPENSE_PALETTE[(activeIncomeCatIndex + 3) % EXPENSE_PALETTE.length]}18`
-                        }}
+                        className="text-[11px] font-bold truncate max-w-[105px] block leading-tight text-center"
+                        style={{ color: EXPENSE_PALETTE[(activeCategory.colorIndex + 3) % EXPENSE_PALETTE.length] }}
+                        title={activeCategory.name}
                       >
-                        {creditCategoryData[activeIncomeCatIndex].name}
+                        {activeCategory.name}
                       </span>
-                      <span className="text-base sm:text-lg font-black text-white font-mono tracking-tight">
-                        {creditCategoryData[activeIncomeCatIndex].value >= 100000 
-                          ? (creditCategoryData[activeIncomeCatIndex].value / 100000).toFixed(2) + 'L' 
-                          : `₹${creditCategoryData[activeIncomeCatIndex].value.toLocaleString('en-IN')}`}
+                      <span className="text-base sm:text-lg font-black text-white font-mono tracking-tight leading-none my-1">
+                        {activeCategory.value >= 100000 
+                          ? (activeCategory.value / 100000).toFixed(2) + 'L' 
+                          : `₹${activeCategory.value.toLocaleString('en-IN')}`}
                       </span>
-                      <span className="text-[10px] text-zinc-300 font-medium">
-                        {creditCategoryData[activeIncomeCatIndex].percentage.toFixed(1)}% · {creditCategoryData[activeIncomeCatIndex].count} receipts
+                      <span className="text-[10px] text-zinc-300 font-medium leading-tight">
+                        {activeCategory.percentage.toFixed(1)}% · {activeCategory.count} receipts
                       </span>
-                    </>
+                    </div>
                   ) : (
-                    <>
-                      <span className="text-[10px] uppercase font-bold tracking-wider text-zinc-500">Inflow</span>
-                      <span className="text-base sm:text-lg font-black text-white font-mono">
+                    <div className="flex flex-col items-center justify-center max-w-[110px]">
+                      <span className="text-[10px] uppercase font-bold tracking-wider text-zinc-400 block leading-tight">Inflow</span>
+                      <span className="text-base sm:text-lg font-black text-white font-mono tracking-tight leading-none my-1">
                         {totalCredit >= 100000 ? `₹${(totalCredit / 100000).toFixed(1)}L` : `₹${totalCredit.toLocaleString('en-IN')}`}
                       </span>
-                      <span className="text-[10px] text-zinc-500 font-medium">
+                      <span className="text-[10px] text-zinc-400 font-medium leading-tight">
                         {creditCategoryData.length} streams
                       </span>
-                    </>
+                    </div>
                   )}
                 </div>
               </div>

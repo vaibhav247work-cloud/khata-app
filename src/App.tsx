@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, useEffectEvent } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Lock } from 'lucide-react';
 import { 
   format, 
   parseISO 
@@ -602,7 +601,7 @@ export function App() {
   }
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans pb-10">
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans pb-10 w-full max-w-full overflow-x-hidden">
       {/* Navigation Header */}
       <AppHeader
         activeTab={activeTab}
@@ -697,56 +696,29 @@ export function App() {
           )}
 
           {activeTab === 'Admin' && (
-            !isAdmin ? (
-              <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 text-center space-y-4 max-w-md mx-auto my-12 shadow-xl">
-                <div className="w-14 h-14 mx-auto rounded-2xl bg-orange-500/15 text-orange-400 border border-orange-500/30 flex items-center justify-center">
-                  <Lock className="w-7 h-7" />
-                </div>
-                <div>
-                  <h3 className="text-xl font-bold text-white">Administrator Access Required</h3>
-                  <p className="text-xs text-zinc-400 mt-2 leading-relaxed">
-                    You are signed in as <span className="text-white font-semibold">{authSession?.name || authSession?.username}</span> (<span className="text-blue-400 font-semibold">Staff</span>). Admin settings, sync deployment links, and category management are restricted to Admin accounts.
-                  </p>
-                </div>
-                <div className="pt-2 flex flex-col sm:flex-row justify-center gap-3">
-                  <button
-                    onClick={() => handleLogout()}
-                    className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-orange-500 to-amber-500 text-white font-semibold text-xs hover:from-orange-600 hover:to-amber-600 transition-all shadow-md shadow-orange-500/20 cursor-pointer"
-                  >
-                    Switch / Sign In as Admin
-                  </button>
-                  <button
-                    onClick={() => navigateToTab('Dashboard')}
-                    className="px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-750 text-zinc-300 font-semibold text-xs transition-colors border border-zinc-700/60 cursor-pointer"
-                  >
-                    Return to Dashboard
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <AdminModule 
-                apiLink={apiLink} 
-                setApiLink={setApiLink} 
-                transactions={transactions} 
-                orders={orders} 
-                showToast={showToast}
-                isAdmin={isAdmin}
-                setIsAdmin={toggleAdmin}
-                resetSyncState={resetSyncState}
-                onGoogleSheetReset={handleGoogleSheetReset}
-                isSyncing={isSyncing}
-                onSync={() => syncWithGoogleSheets('manual')}
-                expenseCategories={expenseCategories}
-                onUpdateCategories={handleUpdateCategories}
-                paymentModes={paymentModes}
-                onUpdatePaymentModes={handleUpdatePaymentModes}
-                markSyncPending={markSyncPending}
-                onRefreshData={loadData}
-                onOpenChangePassword={() => setIsChangePasswordModalOpen(true)}
-                authSession={authSession}
-                isOnline={isOnline}
-              />
-            )
+            <AdminModule 
+              apiLink={apiLink} 
+              setApiLink={setApiLink} 
+              transactions={transactions} 
+              orders={orders} 
+              showToast={showToast}
+              isAdmin={isAdmin}
+              setIsAdmin={toggleAdmin}
+              resetSyncState={resetSyncState}
+              onGoogleSheetReset={handleGoogleSheetReset}
+              isSyncing={isSyncing}
+              onSync={() => syncWithGoogleSheets('manual')}
+              expenseCategories={expenseCategories}
+              onUpdateCategories={handleUpdateCategories}
+              paymentModes={paymentModes}
+              onUpdatePaymentModes={handleUpdatePaymentModes}
+              markSyncPending={markSyncPending}
+              onRefreshData={loadData}
+              onOpenChangePassword={() => setIsChangePasswordModalOpen(true)}
+              onOpenRoleChange={() => setIsRoleChangeModalOpen(true)}
+              authSession={authSession}
+              isOnline={isOnline}
+            />
           )}
         </AnimatePresence>
       </main>

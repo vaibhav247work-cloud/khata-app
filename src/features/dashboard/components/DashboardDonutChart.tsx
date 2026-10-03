@@ -98,6 +98,44 @@ export function DashboardDonutChart({
     };
   }, [transactions, expenseTimeframe]);
 
+  // Donut chart slices: Top 5 categories + 'Others' grouping for long tail
+  const donutChartData = useMemo(() => {
+    const all = expenseCategoryData.items;
+    if (all.length <= 5) {
+      return all.map((item, idx) => ({
+        ...item,
+        isOther: false,
+        colorIndex: idx,
+      }));
+    }
+
+    const top5 = all.slice(0, 5).map((item, idx) => ({
+      ...item,
+      isOther: false,
+      colorIndex: idx,
+    }));
+
+    const others = all.slice(5);
+    const othersTotal = others.reduce((sum, item) => sum + item.value, 0);
+    const othersCount = others.reduce((sum, item) => sum + item.count, 0);
+    const grandTotal = expenseCategoryData.total;
+
+    top5.push({
+      name: 'इतर खर्च (Others)',
+      value: othersTotal,
+      count: othersCount,
+      percentage: grandTotal > 0 ? (othersTotal / grandTotal) * 100 : 0,
+      isOther: true,
+      colorIndex: 5,
+    });
+
+    return top5;
+  }, [expenseCategoryData]);
+
+  const activeCategoryItem = activeCategoryIndex !== null && donutChartData[activeCategoryIndex] 
+    ? donutChartData[activeCategoryIndex] 
+    : null;
+
   const renderDashboardActiveShape = useCallback((props: any) => {
     const { cx, cy, innerRadius, outerRadius, startAngle, endAngle, fill } = props;
     return (
@@ -125,10 +163,6 @@ export function DashboardDonutChart({
     );
   }, []);
 
-  const activeCategoryItem = activeCategoryIndex !== null && expenseCategoryData.items[activeCategoryIndex] 
-    ? expenseCategoryData.items[activeCategoryIndex] 
-    : null;
-
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-5 sm:p-6 shadow-sm space-y-4">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -143,12 +177,12 @@ export function DashboardDonutChart({
         </div>
 
         {/* Timeframe Selector & Reports Link */}
-        <div className="flex items-center gap-2 self-start sm:self-auto flex-wrap">
-          <div className="flex items-center p-1 bg-zinc-950/80 rounded-xl border border-zinc-800/80 text-[11px]">
+        <div className="flex items-center justify-between sm:justify-end gap-2 w-full sm:w-auto">
+          <div className="flex items-center p-0.5 sm:p-1 bg-zinc-950/80 rounded-xl border border-zinc-800/80 text-[11px] shrink-0">
             <button
               type="button"
               onClick={() => { setExpenseTimeframe('this_week'); setActiveCategoryIndex(null); }}
-              className={`px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
+              className={`px-2 sm:px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
                 expenseTimeframe === 'this_week'
                   ? 'bg-zinc-800 text-white shadow-xs'
                   : 'text-zinc-400 hover:text-zinc-200'
@@ -159,7 +193,7 @@ export function DashboardDonutChart({
             <button
               type="button"
               onClick={() => { setExpenseTimeframe('this_month'); setActiveCategoryIndex(null); }}
-              className={`px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
+              className={`px-2 sm:px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
                 expenseTimeframe === 'this_month'
                   ? 'bg-zinc-800 text-white shadow-xs'
                   : 'text-zinc-400 hover:text-zinc-200'
@@ -170,7 +204,7 @@ export function DashboardDonutChart({
             <button
               type="button"
               onClick={() => { setExpenseTimeframe('last_30_days'); setActiveCategoryIndex(null); }}
-              className={`px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
+              className={`px-2 sm:px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
                 expenseTimeframe === 'last_30_days'
                   ? 'bg-zinc-800 text-white shadow-xs'
                   : 'text-zinc-400 hover:text-zinc-200'
@@ -181,7 +215,7 @@ export function DashboardDonutChart({
             <button
               type="button"
               onClick={() => { setExpenseTimeframe('all'); setActiveCategoryIndex(null); }}
-              className={`px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
+              className={`px-2 sm:px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer ${
                 expenseTimeframe === 'all'
                   ? 'bg-zinc-800 text-white shadow-xs'
                   : 'text-zinc-400 hover:text-zinc-200'
@@ -195,7 +229,7 @@ export function DashboardDonutChart({
             <button
               type="button"
               onClick={() => onNavigateToReports('expenses')}
-              className="text-xs font-semibold text-orange-400 hover:text-orange-300 flex items-center gap-0.5 px-2.5 py-1.5 rounded-xl hover:bg-orange-500/10 transition-colors shrink-0 cursor-pointer"
+              className="text-xs font-semibold text-orange-400 hover:text-orange-300 flex items-center gap-0.5 px-2 py-1.5 rounded-xl hover:bg-orange-500/10 transition-colors shrink-0 cursor-pointer"
               title="Open detailed Reports & Analytics"
             >
               <span>Report</span>
@@ -207,22 +241,22 @@ export function DashboardDonutChart({
 
       {/* Quick Spending Habit Insights Strip */}
       {expenseCategoryData.items.length > 0 && (
-        <div className="grid grid-cols-3 gap-2 p-2.5 rounded-2xl bg-zinc-950/60 border border-zinc-800/70 text-[11px]">
-          <div className="text-left px-1">
+        <div className="grid grid-cols-12 gap-2 p-2.5 rounded-2xl bg-zinc-950/60 border border-zinc-800/70 text-[11px] items-center">
+          <div className="col-span-6 sm:col-span-5 text-left px-1 min-w-0" title={expenseCategoryData.topCategory?.name || ''}>
             <span className="text-zinc-500 text-[10px] block font-medium">Top Category</span>
-            <span className="font-bold text-orange-400 truncate block">
+            <span className="font-bold text-orange-400 truncate block text-xs sm:text-sm">
               {expenseCategoryData.topCategory?.name || 'None'}
             </span>
           </div>
-          <div className="text-center px-1 border-x border-zinc-800/80">
-            <span className="text-zinc-500 text-[10px] block font-medium">Category Share</span>
-            <span className="font-bold text-white font-mono block">
+          <div className="col-span-3 sm:col-span-3 text-center px-1 border-x border-zinc-800/80">
+            <span className="text-zinc-500 text-[10px] block font-medium">Share</span>
+            <span className="font-bold text-white font-mono block text-xs sm:text-sm">
               {expenseCategoryData.topCategory ? `${expenseCategoryData.topCategory.percentage.toFixed(1)}%` : '0%'}
             </span>
           </div>
-          <div className="text-right px-1">
-            <span className="text-zinc-500 text-[10px] block font-medium">Avg Spend / Txn</span>
-            <span className="font-bold text-emerald-400 font-mono block">
+          <div className="col-span-3 sm:col-span-4 text-right px-1">
+            <span className="text-zinc-500 text-[10px] block font-medium">Avg / Txn</span>
+            <span className="font-bold text-emerald-400 font-mono block text-xs sm:text-sm">
               ₹{expenseCategoryData.avgPerTxn.toLocaleString('en-IN')}
             </span>
           </div>
@@ -249,21 +283,22 @@ export function DashboardDonutChart({
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-center pt-1">
           {/* Donut Chart with Center Metric Callout */}
-          <div className="md:col-span-5 flex items-center justify-center">
-            <div className="w-48 h-48 sm:w-52 sm:h-52 relative">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
+          <div className="md:col-span-5 flex flex-col items-center justify-center">
+            <div className="w-56 h-56 sm:w-60 sm:h-60 relative flex items-center justify-center">
+              <ResponsiveContainer width="100%" height="100%" minWidth={210} minHeight={210}>
+                <PieChart width={240} height={240}>
                   <Pie
-                    data={expenseCategoryData.items}
+                    data={donutChartData}
                     cx="50%"
                     cy="50%"
-                    innerRadius={50}
-                    outerRadius={72}
-                    paddingAngle={3}
+                    innerRadius={60}
+                    outerRadius={88}
+                    paddingAngle={donutChartData.length > 1 ? 2 : 0}
+                    minAngle={4}
                     dataKey="value"
                     stroke="#18181b"
-                    strokeWidth={2}
-                    activeIndex={activeCategoryIndex !== null ? activeCategoryIndex : undefined}
+                    strokeWidth={donutChartData.length > 1 ? 2 : 0}
+                    activeIndex={activeCategoryIndex !== null && activeCategoryIndex < donutChartData.length ? activeCategoryIndex : undefined}
                     activeShape={renderDashboardActiveShape}
                     onMouseEnter={(_, index) => setActiveCategoryIndex(index)}
                     onMouseLeave={() => setActiveCategoryIndex(null)}
@@ -271,10 +306,10 @@ export function DashboardDonutChart({
                       setActiveCategoryIndex(prev => prev === index ? null : index);
                     }}
                   >
-                    {expenseCategoryData.items.map((entry, index) => (
+                    {donutChartData.map((entry, index) => (
                       <Cell 
                         key={`expense-donut-${entry.name}-${index}`} 
-                        fill={EXPENSE_PALETTE[index % EXPENSE_PALETTE.length]} 
+                        fill={EXPENSE_PALETTE[entry.colorIndex % EXPENSE_PALETTE.length]} 
                       />
                     ))}
                   </Pie>
@@ -287,7 +322,7 @@ export function DashboardDonutChart({
                           <div className="bg-zinc-950/95 border border-zinc-800 p-2.5 rounded-xl shadow-xl text-xs backdrop-blur-md z-50">
                             <div className="flex items-center gap-2 mb-1">
                               <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: fillColor }} />
-                              <span className="font-bold text-white truncate max-w-[140px]">{data.name}</span>
+                              <span className="font-bold text-white truncate max-w-[150px]">{data.name}</span>
                             </div>
                             <div className="text-zinc-200 font-mono font-semibold">
                               ₹{data.value.toLocaleString('en-IN')}
@@ -307,44 +342,67 @@ export function DashboardDonutChart({
                 </PieChart>
               </ResponsiveContainer>
 
-              {/* Center Callout Metric */}
-              <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none text-center p-2 transition-all">
+              {/* Center Callout Metric (Designed to fit cleanly within 120px inner hole) */}
+              <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none text-center px-2 py-1 transition-all">
                 {activeCategoryItem ? (
-                  <>
+                  <div className="flex flex-col items-center justify-center max-w-[105px]">
                     <span 
-                      className="text-[10px] uppercase font-bold tracking-wider truncate max-w-[125px] px-2 py-0.5 rounded-full border mb-0.5"
-                      style={{ 
-                        color: EXPENSE_PALETTE[activeCategoryIndex! % EXPENSE_PALETTE.length],
-                        borderColor: `${EXPENSE_PALETTE[activeCategoryIndex! % EXPENSE_PALETTE.length]}40`,
-                        backgroundColor: `${EXPENSE_PALETTE[activeCategoryIndex! % EXPENSE_PALETTE.length]}18`
-                      }}
+                      className="text-[11px] font-bold truncate max-w-[102px] block leading-tight text-center"
+                      style={{ color: EXPENSE_PALETTE[activeCategoryItem.colorIndex % EXPENSE_PALETTE.length] }}
+                      title={activeCategoryItem.name}
                     >
                       {activeCategoryItem.name}
                     </span>
-                    <span className="text-sm sm:text-base font-black text-white font-mono tracking-tight">
+                    <span className="text-base sm:text-lg font-black text-white font-mono tracking-tight leading-none my-1">
                       ₹{activeCategoryItem.value >= 100000 
                         ? (activeCategoryItem.value / 100000).toFixed(1) + 'L' 
                         : activeCategoryItem.value.toLocaleString('en-IN')}
                     </span>
-                    <span className="text-[10px] text-zinc-300 font-medium">
+                    <span className="text-[10px] text-zinc-300 font-medium leading-tight">
                       {activeCategoryItem.percentage.toFixed(1)}% · {activeCategoryItem.count} txn{activeCategoryItem.count === 1 ? '' : 's'}
                     </span>
-                  </>
+                  </div>
                 ) : (
-                  <>
-                    <span className="text-[10px] uppercase font-bold tracking-wider text-zinc-500">Total Spent</span>
-                    <span className="text-base sm:text-lg font-black text-white font-mono tracking-tight">
+                  <div className="flex flex-col items-center justify-center max-w-[105px]">
+                    <span className="text-[10px] uppercase font-bold tracking-wider text-zinc-400 block leading-tight">
+                      Total Spent
+                    </span>
+                    <span className="text-lg sm:text-xl font-black text-white font-mono tracking-tight leading-none my-1">
                       ₹{expenseCategoryData.total >= 100000 
                         ? (expenseCategoryData.total / 100000).toFixed(1) + 'L' 
                         : expenseCategoryData.total.toLocaleString('en-IN')}
                     </span>
-                    <span className="text-[9px] text-zinc-500 font-medium">
-                      {expenseCategoryData.items.length} categor{expenseCategoryData.items.length === 1 ? 'y' : 'ies'} · {expenseCategoryData.txnCount} txns
+                    <span className="text-[10px] text-zinc-400 font-medium leading-tight">
+                      {expenseCategoryData.items.length} categories · {expenseCategoryData.txnCount} txns
                     </span>
-                  </>
+                  </div>
                 )}
               </div>
             </div>
+
+            {/* Active Category Indicator Banner (Guarantees 100% full-name visibility without any truncation) */}
+            {activeCategoryItem && (
+              <div className="mt-1 flex items-center justify-center">
+                <div 
+                  className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs border shadow-sm"
+                  style={{ 
+                    borderColor: `${EXPENSE_PALETTE[activeCategoryItem.colorIndex % EXPENSE_PALETTE.length]}40`,
+                    backgroundColor: `${EXPENSE_PALETTE[activeCategoryItem.colorIndex % EXPENSE_PALETTE.length]}15`
+                  }}
+                >
+                  <span 
+                    className="w-2 h-2 rounded-full shrink-0" 
+                    style={{ backgroundColor: EXPENSE_PALETTE[activeCategoryItem.colorIndex % EXPENSE_PALETTE.length] }} 
+                  />
+                  <span className="font-semibold text-white max-w-[160px] sm:max-w-[220px] truncate">
+                    {activeCategoryItem.name}
+                  </span>
+                  <span className="font-bold text-white font-mono">
+                    ₹{activeCategoryItem.value.toLocaleString('en-IN')}
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Ranked Category Distribution Breakdown */}
@@ -393,7 +451,22 @@ export function DashboardDonutChart({
 
             {expenseCategoryData.items.length > 5 && (
               <div className="pt-1.5 flex items-center justify-between text-[11px] text-zinc-500">
-                <span>+{expenseCategoryData.items.length - 5} more categories</span>
+                <button
+                  type="button"
+                  onMouseEnter={() => setActiveCategoryIndex(5)}
+                  onMouseLeave={() => setActiveCategoryIndex(null)}
+                  onClick={() => setActiveCategoryIndex(prev => prev === 5 ? null : 5)}
+                  className={`flex items-center gap-1.5 px-2 py-1 rounded-lg transition-all cursor-pointer ${
+                    activeCategoryIndex === 5 ? 'bg-zinc-800 text-amber-300 font-bold' : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                  title="Highlight Other Categories in Donut"
+                >
+                  <span 
+                    className="w-2 h-2 rounded-full shrink-0" 
+                    style={{ backgroundColor: EXPENSE_PALETTE[5 % EXPENSE_PALETTE.length] }} 
+                  />
+                  <span>+{expenseCategoryData.items.length - 5} more in इतर खर्च</span>
+                </button>
                 {onNavigateToReports && (
                   <button 
                     type="button" 

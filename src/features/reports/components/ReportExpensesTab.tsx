@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { ChevronUp, ChevronDown } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
 import { 
@@ -36,6 +36,29 @@ export function ReportExpensesTab({
   const [activeExpenseCatIndex, setActiveExpenseCatIndex] = useState<number | null>(null);
   const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
 
+  // Group into Top 5 + Others for clean, non-collapsing donut chart
+  const chartData = useMemo(() => {
+    if (debitCategoryData.length <= 6) {
+      return debitCategoryData.map((d, i) => ({ ...d, colorIndex: i }));
+    }
+    const top5 = debitCategoryData.slice(0, 5).map((d, i) => ({ ...d, colorIndex: i }));
+    const others = debitCategoryData.slice(5);
+    const othersTotal = others.reduce((s, d) => s + d.value, 0);
+    const othersCount = others.reduce((s, d) => s + d.count, 0);
+    top5.push({
+      name: 'इतर खर्च (Others)',
+      value: othersTotal,
+      count: othersCount,
+      percentage: totalDebit > 0 ? (othersTotal / totalDebit) * 100 : 0,
+      colorIndex: 5,
+    });
+    return top5;
+  }, [debitCategoryData, totalDebit]);
+
+  const activeCategory = activeExpenseCatIndex !== null && chartData[activeExpenseCatIndex]
+    ? chartData[activeExpenseCatIndex]
+    : null;
+
   return (
     <div className="space-y-6">
       <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-6">
@@ -63,33 +86,34 @@ export function ReportExpensesTab({
           <div className="grid grid-cols-1 md:grid-cols-12 gap-8 items-start">
             {/* Donut Chart with Active Sector & Center Callout */}
             <div className="md:col-span-5 flex items-center justify-center sticky top-4">
-              <div className="w-56 h-56 relative">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
+              <div className="w-56 h-56 relative flex items-center justify-center">
+                <ResponsiveContainer width="100%" height="100%" minWidth={190} minHeight={190}>
+                  <PieChart width={224} height={224}>
                     <Pie
-                      data={debitCategoryData}
+                      data={chartData}
                       cx="50%"
                       cy="50%"
                       innerRadius={58}
                       outerRadius={82}
-                      paddingAngle={3}
+                      paddingAngle={chartData.length > 1 ? 2 : 0}
+                      minAngle={4}
                       dataKey="value"
                       stroke="#18181b"
-                      strokeWidth={2}
-                      activeIndex={activeExpenseCatIndex !== null ? activeExpenseCatIndex : undefined}
+                      strokeWidth={chartData.length > 1 ? 2 : 0}
+                      activeIndex={activeExpenseCatIndex !== null && activeExpenseCatIndex < chartData.length ? activeExpenseCatIndex : undefined}
                       activeShape={renderReportActiveShape}
                       onMouseEnter={(_, index) => setActiveExpenseCatIndex(index)}
                       onMouseLeave={() => setActiveExpenseCatIndex(null)}
                       onClick={(_, index) => {
                         setActiveExpenseCatIndex(prev => prev === index ? null : index);
-                        const cat = debitCategoryData[index];
-                        if (cat) {
+                        const cat = chartData[index];
+                        if (cat && !cat.name.includes('इतर खर्च')) {
                           setExpandedCategory(prev => prev === cat.name ? null : cat.name);
                         }
                       }}
                     >
-                      {debitCategoryData.map((_entry, index) => (
-                        <Cell key={`rep-exp-cell-${index}`} fill={EXPENSE_PALETTE[index % EXPENSE_PALETTE.length]} />
+                      {chartData.map((entry, index) => (
+                        <Cell key={`rep-exp-cell-${index}`} fill={EXPENSE_PALETTE[entry.colorIndex % EXPENSE_PALETTE.length]} />
                       ))}
                     </Pie>
                     <Tooltip
@@ -117,38 +141,35 @@ export function ReportExpensesTab({
                 </ResponsiveContainer>
 
                 {/* Dynamic Center Metric Callout */}
-                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none text-center p-2 transition-all">
-                  {activeExpenseCatIndex !== null && debitCategoryData[activeExpenseCatIndex] ? (
-                    <>
+                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none text-center px-2 py-1 transition-all">
+                  {activeCategory ? (
+                    <div className="flex flex-col items-center justify-center max-w-[110px]">
                       <span 
-                        className="text-[10px] uppercase font-bold tracking-wider truncate max-w-[130px] px-2 py-0.5 rounded-full border mb-0.5"
-                        style={{ 
-                          color: EXPENSE_PALETTE[activeExpenseCatIndex % EXPENSE_PALETTE.length],
-                          borderColor: `${EXPENSE_PALETTE[activeExpenseCatIndex % EXPENSE_PALETTE.length]}40`,
-                          backgroundColor: `${EXPENSE_PALETTE[activeExpenseCatIndex % EXPENSE_PALETTE.length]}18`
-                        }}
+                        className="text-[11px] font-bold truncate max-w-[105px] block leading-tight text-center"
+                        style={{ color: EXPENSE_PALETTE[activeCategory.colorIndex % EXPENSE_PALETTE.length] }}
+                        title={activeCategory.name}
                       >
-                        {debitCategoryData[activeExpenseCatIndex].name}
+                        {activeCategory.name}
                       </span>
-                      <span className="text-base sm:text-lg font-black text-white font-mono tracking-tight">
-                        {debitCategoryData[activeExpenseCatIndex].value >= 100000 
-                          ? (debitCategoryData[activeExpenseCatIndex].value / 100000).toFixed(2) + 'L' 
-                          : `₹${debitCategoryData[activeExpenseCatIndex].value.toLocaleString('en-IN')}`}
+                      <span className="text-base sm:text-lg font-black text-white font-mono tracking-tight leading-none my-1">
+                        {activeCategory.value >= 100000 
+                          ? (activeCategory.value / 100000).toFixed(2) + 'L' 
+                          : `₹${activeCategory.value.toLocaleString('en-IN')}`}
                       </span>
-                      <span className="text-[10px] text-zinc-300 font-medium">
-                        {debitCategoryData[activeExpenseCatIndex].percentage.toFixed(1)}% · {debitCategoryData[activeExpenseCatIndex].count} txns
+                      <span className="text-[10px] text-zinc-300 font-medium leading-tight">
+                        {activeCategory.percentage.toFixed(1)}% · {activeCategory.count} txns
                       </span>
-                    </>
+                    </div>
                   ) : (
-                    <>
-                      <span className="text-[10px] uppercase font-bold tracking-wider text-zinc-500">Expenses</span>
-                      <span className="text-base sm:text-lg font-black text-white font-mono tracking-tight">
+                    <div className="flex flex-col items-center justify-center max-w-[110px]">
+                      <span className="text-[10px] uppercase font-bold tracking-wider text-zinc-400 block leading-tight">Expenses</span>
+                      <span className="text-base sm:text-lg font-black text-white font-mono tracking-tight leading-none my-1">
                         {totalDebit >= 100000 ? `₹${(totalDebit / 100000).toFixed(1)}L` : `₹${totalDebit.toLocaleString('en-IN')}`}
                       </span>
-                      <span className="text-[10px] text-zinc-500 font-medium">
+                      <span className="text-[10px] text-zinc-400 font-medium leading-tight">
                         {debitCategoryData.length} categories
                       </span>
-                    </>
+                    </div>
                   )}
                 </div>
               </div>

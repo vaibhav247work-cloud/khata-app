@@ -3,6 +3,9 @@ import { motion, AnimatePresence } from 'motion/react';
 import { 
   Settings, 
   ShieldCheck, 
+  UserCheck,
+  ArrowRightLeft,
+  Lock,
   Key, 
   FileCode, 
   RefreshCw, 
@@ -53,6 +56,7 @@ export interface AdminModuleProps {
   markSyncPending?: () => void;
   onRefreshData?: () => void;
   onOpenChangePassword?: () => void;
+  onOpenRoleChange?: () => void;
   authSession?: AuthSession | null;
   isOnline: boolean;
 }
@@ -75,6 +79,7 @@ export function AdminModule({
   markSyncPending,
   onRefreshData,
   onOpenChangePassword,
+  onOpenRoleChange,
   authSession,
   isOnline,
 }: AdminModuleProps) {
@@ -307,57 +312,111 @@ export function AdminModule({
       animate={{ opacity: 1, y: 0 }}
       className="max-w-2xl mx-auto space-y-8"
     >
-      <div className="bg-zinc-900 border border-zinc-800 rounded-[40px] p-8 sm:p-10">
-        <div className="flex items-center gap-3 mb-10">
-          <div className="w-12 h-12 bg-orange-500/10 rounded-2xl flex items-center justify-center">
-            <Settings className="text-orange-500 w-6 h-6" />
+      <div className="bg-zinc-900 border border-zinc-800 rounded-3xl sm:rounded-[40px] p-4 sm:p-8 sm:p-10 shadow-xl overflow-hidden">
+        <div className="flex items-center gap-3 mb-6 sm:mb-10">
+          <div className="w-10 h-10 sm:w-12 sm:h-12 bg-orange-500/10 rounded-2xl flex items-center justify-center shrink-0">
+            <Settings className="text-orange-500 w-5 h-5 sm:w-6 sm:h-6" />
           </div>
-          <h3 className="text-2xl font-bold tracking-tight text-white">System Settings</h3>
+          <h3 className="text-xl sm:text-2xl font-bold tracking-tight text-white">System Settings</h3>
         </div>
         
-        <div className="space-y-10">
+        <div className="space-y-6 sm:space-y-10">
           {/* Authenticated Role Status */}
-          <div className="flex items-center justify-between p-4 sm:p-6 bg-zinc-800/30 rounded-[32px] border border-zinc-800/50 gap-4">
-            <div className="flex-1">
-              <div className="flex items-center gap-2 mb-1">
-                <p className="font-bold text-base sm:text-lg text-white">Administrator Privileges</p>
-                <span className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-orange-500/20 text-orange-400 border border-orange-500/30">
-                  Verified
+          <div className="flex items-center justify-between p-4 sm:p-6 bg-zinc-800/30 rounded-2xl sm:rounded-[32px] border border-zinc-800/50 gap-3 sm:gap-4">
+            <div className="flex-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2 mb-1">
+                <p className="font-bold text-base sm:text-lg text-white">
+                  {isAdmin ? 'Administrator Privileges' : 'Staff Member Access'}
+                </p>
+                <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider border ${
+                  isAdmin 
+                    ? 'bg-orange-500/20 text-orange-400 border-orange-500/30' 
+                    : 'bg-blue-500/20 text-blue-400 border-blue-500/30'
+                }`}>
+                  {isAdmin ? 'Verified Admin' : 'Staff Member'}
                 </span>
               </div>
-              <p className="text-[10px] sm:text-xs text-zinc-500 leading-relaxed max-w-[280px] sm:max-w-md">
-                Identified automatically from your account in the Google Sheet <span className="text-zinc-400 font-mono">Users</span> tab.
+              <p className="text-[11px] sm:text-xs text-zinc-400 leading-relaxed max-w-md">
+                {isAdmin ? (
+                  <>Identified automatically from your account in the Google Sheet <span className="text-zinc-300 font-mono">Users</span> tab.</>
+                ) : (
+                  <>Signed in as <span className="text-white font-semibold">{authSession?.name || authSession?.username}</span> (@{authSession?.username || 'user'}). Standard ledger and transaction editing active.</>
+                )}
               </p>
             </div>
-            <div className="w-10 h-10 rounded-2xl bg-orange-500/10 border border-orange-500/30 flex items-center justify-center text-orange-400 shrink-0">
-              <ShieldCheck className="w-5 h-5" />
+            <div className={`w-10 h-10 rounded-2xl border flex items-center justify-center shrink-0 ${
+              isAdmin 
+                ? 'bg-orange-500/10 border-orange-500/30 text-orange-400' 
+                : 'bg-blue-500/10 border-blue-500/30 text-blue-400'
+            }`}>
+              {isAdmin ? <ShieldCheck className="w-5 h-5" /> : <UserCheck className="w-5 h-5" />}
             </div>
           </div>
 
+          {/* Change Role Request Card */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between p-4 sm:p-6 bg-zinc-800/30 rounded-2xl sm:rounded-[32px] border border-zinc-800/50 gap-4">
+            <div className="flex-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2 mb-1">
+                <p className="font-bold text-base sm:text-lg text-white">Change Role Request</p>
+                <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider border ${
+                  isAdmin 
+                    ? 'bg-orange-500/20 text-orange-400 border-orange-500/30' 
+                    : 'bg-blue-500/20 text-blue-400 border-blue-500/30'
+                }`}>
+                  {isAdmin ? 'Admin' : 'Staff'}
+                </span>
+              </div>
+              <p className="text-[11px] sm:text-xs text-zinc-400 leading-relaxed max-w-md">
+                {isAdmin 
+                  ? 'Request to switch your role to Staff, or adjust account permissions in the cloud registry.' 
+                  : 'Submit a role elevation request to be granted Administrator privileges with full sync and system control.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onOpenRoleChange}
+              className="w-full sm:w-auto px-4 py-2.5 rounded-xl sm:rounded-2xl bg-orange-500/15 hover:bg-orange-500/25 border border-orange-500/30 text-orange-300 font-bold text-xs flex items-center justify-center gap-2 transition-all active:scale-95 shrink-0 cursor-pointer shadow-sm"
+              title="Request Role Change"
+            >
+              <ArrowRightLeft className="w-4 h-4" />
+              <span>{isAdmin ? 'Switch / Change Role' : 'Request Admin Role'}</span>
+            </button>
+          </div>
+
           {/* Account Password & Security */}
-          <div className="flex items-center justify-between p-4 sm:p-6 bg-zinc-800/30 rounded-[32px] border border-zinc-800/50 gap-4">
-            <div className="flex-1">
-              <div className="flex items-center gap-2 mb-1">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between p-4 sm:p-6 bg-zinc-800/30 rounded-2xl sm:rounded-[32px] border border-zinc-800/50 gap-4">
+            <div className="flex-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2 mb-1">
                 <p className="font-bold text-base sm:text-lg text-white">Account Password & Security</p>
                 <span className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-amber-500/20 text-amber-400 border border-amber-500/30">
                   Security
                 </span>
               </div>
-              <p className="text-[10px] sm:text-xs text-zinc-500 leading-relaxed max-w-[280px] sm:max-w-md">
-                Change your password from the default <span className="text-zinc-400 font-mono">admin</span> to prevent Google Password Manager breach warnings and secure your system.
+              <p className="text-[11px] sm:text-xs text-zinc-400 leading-relaxed max-w-md">
+                Change your password from the default <span className="text-zinc-300 font-mono font-semibold">admin</span> to prevent Google Password Manager breach warnings and secure your system.
               </p>
             </div>
             <button
               type="button"
               onClick={onOpenChangePassword}
-              className="px-4 py-2.5 rounded-2xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 font-bold text-xs flex items-center gap-1.5 transition-all active:scale-95 shrink-0 cursor-pointer"
+              className="w-full sm:w-auto px-4 py-2.5 rounded-xl sm:rounded-2xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 font-bold text-xs flex items-center justify-center gap-2 transition-all active:scale-95 shrink-0 cursor-pointer shadow-sm"
             >
               <Key className="w-4 h-4" />
               <span>Change Password</span>
             </button>
           </div>
 
-          {/* User Accounts & Registration Approvals */}
+          {/* Notice for Staff Accounts */}
+          {!isAdmin && (
+            <div className="p-4 sm:p-5 bg-zinc-800/20 rounded-2xl border border-zinc-800/50 flex items-start sm:items-center gap-3">
+              <Lock className="w-5 h-5 text-orange-400 shrink-0 mt-0.5 sm:mt-0" />
+              <div className="text-xs text-zinc-400 leading-relaxed">
+                <span className="font-semibold text-zinc-300">Staff Mode:</span> Google Sheet cloud synchronization link, category management, and database resets are restricted to Administrator accounts. Use the <strong className="text-orange-400">Change Role Request</strong> card above if you need Administrator privileges.
+              </div>
+            </div>
+          )}
+
+          {/* User Accounts & Registration Approvals (Admin Only) */}
           {isAdmin && (
             <UserManagementSection
               localUsersList={localUsersList}
@@ -372,63 +431,67 @@ export function AdminModule({
             />
           )}
 
-          {/* API Link Section */}
-          <div className="space-y-4">
-            <label className="block text-[10px] font-black text-zinc-500 uppercase tracking-[0.2em] ml-2">Google Sheet API Link</label>
-            <div className="flex flex-col sm:flex-row gap-3">
-              <div className="flex-1 relative">
-                <input 
-                  type="text" 
-                  value={apiLink}
-                  onChange={(e) => setApiLink(e.target.value)}
-                  placeholder="https://script.google.com/macros/s/..."
-                  className="w-full bg-zinc-800/50 border border-zinc-700/50 rounded-2xl px-6 py-4 text-sm text-white focus:outline-none focus:border-orange-500/50 transition-all placeholder:text-zinc-600"
-                />
+          {/* API Link Section (Admin Only) */}
+          {isAdmin && (
+            <div className="space-y-4">
+              <label className="block text-[10px] font-black text-zinc-500 uppercase tracking-[0.2em] ml-2">Google Sheet API Link</label>
+              <div className="flex flex-col sm:flex-row gap-3">
+                <div className="flex-1 relative">
+                  <input 
+                    type="text" 
+                    value={apiLink}
+                    onChange={(e) => setApiLink(e.target.value)}
+                    placeholder="https://script.google.com/macros/s/..."
+                    className="w-full bg-zinc-800/50 border border-zinc-700/50 rounded-2xl px-6 py-4 text-sm text-white focus:outline-none focus:border-orange-500/50 transition-all placeholder:text-zinc-600"
+                  />
+                </div>
+                <button 
+                  onClick={handleSaveApi} 
+                  className="bg-orange-500 hover:bg-orange-600 px-8 py-4 rounded-2xl font-bold text-sm text-white transition-all shadow-lg shadow-orange-500/20 active:scale-95 whitespace-nowrap cursor-pointer"
+                >
+                  Save Changes
+                </button>
               </div>
-              <button 
-                onClick={handleSaveApi} 
-                className="bg-orange-500 hover:bg-orange-600 px-8 py-4 rounded-2xl font-bold text-sm text-white transition-all shadow-lg shadow-orange-500/20 active:scale-95 whitespace-nowrap cursor-pointer"
+              <button
+                onClick={() => void handleSync()}
+                disabled={isSyncing || !apiLink}
+                className="w-full bg-emerald-500 hover:bg-emerald-600 px-8 py-4 rounded-2xl font-bold text-sm text-white transition-all shadow-lg shadow-emerald-500/20 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
               >
-                Save Changes
+                {isSyncing ? 'Syncing...' : syncButtonLabel}
               </button>
+              <button
+                onClick={() => setShowAppsScriptModal(true)}
+                className="w-full bg-zinc-800/80 hover:bg-zinc-700/80 border border-zinc-700/60 text-zinc-200 px-6 py-3.5 rounded-2xl font-bold text-xs sm:text-sm flex items-center justify-center gap-2.5 transition-all active:scale-98 shadow-sm cursor-pointer"
+              >
+                <FileCode className="w-4 h-4 text-orange-400" />
+                View & Copy Google Apps Script Code
+              </button>
+              <div className="ml-2 text-[10px] text-zinc-600 flex items-center gap-1.5">
+                <div className="w-1 h-1 bg-zinc-600 rounded-full" />
+                This link connects your app to Google Sheets for cloud backup and reconnect auto-sync.
+              </div>
             </div>
-            <button
-              onClick={() => void handleSync()}
-              disabled={isSyncing || !apiLink}
-              className="w-full bg-emerald-500 hover:bg-emerald-600 px-8 py-4 rounded-2xl font-bold text-sm text-white transition-all shadow-lg shadow-emerald-500/20 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-            >
-              {isSyncing ? 'Syncing...' : syncButtonLabel}
-            </button>
-            <button
-              onClick={() => setShowAppsScriptModal(true)}
-              className="w-full bg-zinc-800/80 hover:bg-zinc-700/80 border border-zinc-700/60 text-zinc-200 px-6 py-3.5 rounded-2xl font-bold text-xs sm:text-sm flex items-center justify-center gap-2.5 transition-all active:scale-98 shadow-sm cursor-pointer"
-            >
-              <FileCode className="w-4 h-4 text-orange-400" />
-              View & Copy Google Apps Script Code
-            </button>
-            <div className="ml-2 text-[10px] text-zinc-600 flex items-center gap-1.5">
-              <div className="w-1 h-1 bg-zinc-600 rounded-full" />
-              This link connects your app to Google Sheets for cloud backup and reconnect auto-sync.
-            </div>
-          </div>
+          )}
 
-          {/* Data Management */}
-          <div className="pt-10 border-t border-zinc-800/50">
-            <h4 className="font-bold mb-6 text-sm flex items-center gap-2 text-white">
-              <RefreshCw className="w-4 h-4 text-zinc-500" />
-              Data Management
-            </h4>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="bg-zinc-800/20 p-6 rounded-[28px] border border-zinc-800/50">
-                <p className="text-zinc-500 text-[10px] uppercase font-black tracking-wider mb-2">Total Records</p>
-                <p className="text-2xl font-bold text-white">{transactions.length + orders.length}</p>
-              </div>
-              <div className="bg-zinc-800/20 p-6 rounded-[28px] border border-zinc-800/50">
-                <p className="text-zinc-500 text-[10px] uppercase font-black tracking-wider mb-2">Storage Used</p>
-                <p className="text-2xl font-bold text-white">~{(JSON.stringify(transactions).length / 1024).toFixed(1)} KB</p>
+          {/* Data Management (Admin Only) */}
+          {isAdmin && (
+            <div className="pt-10 border-t border-zinc-800/50">
+              <h4 className="font-bold mb-6 text-sm flex items-center gap-2 text-white">
+                <RefreshCw className="w-4 h-4 text-zinc-500" />
+                Data Management
+              </h4>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="bg-zinc-800/20 p-6 rounded-[28px] border border-zinc-800/50">
+                  <p className="text-zinc-500 text-[10px] uppercase font-black tracking-wider mb-2">Total Records</p>
+                  <p className="text-2xl font-bold text-white">{transactions.length + orders.length}</p>
+                </div>
+                <div className="bg-zinc-800/20 p-6 rounded-[28px] border border-zinc-800/50">
+                  <p className="text-zinc-500 text-[10px] uppercase font-black tracking-wider mb-2">Storage Used</p>
+                  <p className="text-2xl font-bold text-white">~{(JSON.stringify(transactions).length / 1024).toFixed(1)} KB</p>
+                </div>
               </div>
             </div>
-          </div>
+          )}
 
           {/* Progressive Web App (PWA) & Offline Capabilities Section */}
           <PWASection
@@ -438,46 +501,52 @@ export function AdminModule({
             showToast={showToast}
           />
 
-          {/* Reset Action */}
-          <div className="pt-6">
-            <div className="space-y-4">
-              <button 
-                onClick={() => setShowClearConfirm(true)}
-                className="w-full bg-red-500/5 hover:bg-red-500/10 text-red-500 py-5 rounded-[28px] font-bold text-sm flex items-center justify-center gap-3 transition-all border border-red-500/10 cursor-pointer"
-              >
-                <Trash2 className="w-4 h-4" /> Reset Local Database
-              </button>
-              <button 
-                onClick={() => setShowGoogleResetConfirm(true)}
-                disabled={isResettingGoogleSheet}
-                className="w-full bg-blue-500/5 hover:bg-blue-500/10 text-blue-400 py-5 rounded-[28px] font-bold text-sm flex items-center justify-center gap-3 transition-all border border-blue-500/10 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-              >
-                <Trash2 className="w-4 h-4" /> {isResettingGoogleSheet ? 'Resetting Google Sheet...' : 'Reset Google Sheet Data'}
-              </button>
+          {/* Reset Action (Admin Only) */}
+          {isAdmin && (
+            <div className="pt-6">
+              <div className="space-y-4">
+                <button 
+                  onClick={() => setShowClearConfirm(true)}
+                  className="w-full bg-red-500/5 hover:bg-red-500/10 text-red-500 py-5 rounded-[28px] font-bold text-sm flex items-center justify-center gap-3 transition-all border border-red-500/10 cursor-pointer"
+                >
+                  <Trash2 className="w-4 h-4" /> Reset Local Database
+                </button>
+                <button 
+                  onClick={() => setShowGoogleResetConfirm(true)}
+                  disabled={isResettingGoogleSheet}
+                  className="w-full bg-blue-500/5 hover:bg-blue-500/10 text-blue-400 py-5 rounded-[28px] font-bold text-sm flex items-center justify-center gap-3 transition-all border border-blue-500/10 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  <Trash2 className="w-4 h-4" /> {isResettingGoogleSheet ? 'Resetting Google Sheet...' : 'Reset Google Sheet Data'}
+                </button>
+              </div>
             </div>
-          </div>
+          )}
         </div>
       </div>
 
-      {/* Expense Categories Manager */}
-      <ExpenseCategoriesManager
-        categories={expenseCategories}
-        onUpdateCategories={onUpdateCategories}
-        transactions={transactions}
-        showToast={showToast}
-        markSyncPending={markSyncPending}
-        onRefreshData={onRefreshData}
-      />
+      {/* Expense Categories Manager (Admin Only) */}
+      {isAdmin && (
+        <ExpenseCategoriesManager
+          categories={expenseCategories}
+          onUpdateCategories={onUpdateCategories}
+          transactions={transactions}
+          showToast={showToast}
+          markSyncPending={markSyncPending}
+          onRefreshData={onRefreshData}
+        />
+      )}
 
-      {/* Payment Modes Manager */}
-      <PaymentModesManager
-        paymentModes={paymentModes}
-        onUpdatePaymentModes={onUpdatePaymentModes}
-        transactions={transactions}
-        showToast={showToast}
-        markSyncPending={markSyncPending}
-        onRefreshData={onRefreshData}
-      />
+      {/* Payment Modes Manager (Admin Only) */}
+      {isAdmin && (
+        <PaymentModesManager
+          paymentModes={paymentModes}
+          onUpdatePaymentModes={onUpdatePaymentModes}
+          transactions={transactions}
+          showToast={showToast}
+          markSyncPending={markSyncPending}
+          onRefreshData={onRefreshData}
+        />
+      )}
 
       {/* Clear Confirmation Modal */}
       <AnimatePresence>

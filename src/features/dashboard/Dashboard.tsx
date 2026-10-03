@@ -87,28 +87,24 @@ export function Dashboard({
       className="space-y-6"
     >
       {/* Quick Access Action Buttons */}
-      <div className="grid grid-cols-2 gap-3 sm:gap-4">
+      <div className="grid grid-cols-2 gap-2.5 sm:gap-3">
         <button
           id="home-quick-add-txn-btn"
           type="button"
           onClick={onOpenAddTransaction}
-          className="group relative overflow-hidden bg-gradient-to-br from-orange-500 to-amber-600 hover:from-orange-600 hover:to-amber-700 text-white p-4 sm:p-5 rounded-3xl shadow-lg shadow-orange-500/20 active:scale-95 transition-all text-left flex items-center justify-between border border-orange-400/30 cursor-pointer"
+          className="group bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 text-white p-3 sm:p-3.5 rounded-2xl shadow-md shadow-orange-500/15 active:scale-95 transition-all flex items-center gap-2.5 sm:gap-3 border border-orange-400/30 cursor-pointer"
           title="Add New Transaction (Income / Expense)"
         >
-          <div className="min-w-0 pr-2">
-            <div className="flex items-center gap-1.5 text-xs font-semibold text-orange-100 uppercase tracking-wider">
-              <Plus className="w-3.5 h-3.5 stroke-[3]" />
-              <span>Quick Entry</span>
-            </div>
-            <div className="text-lg sm:text-2xl font-black mt-0.5 truncate tracking-tight text-white group-hover:translate-x-0.5 transition-transform">
-              + Txn
-            </div>
-            <p className="text-[11px] sm:text-xs text-orange-100/85 truncate mt-0.5 font-medium">
-              Income / Expense
-            </p>
+          <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-white/20 backdrop-blur-xs flex items-center justify-center shrink-0 border border-white/25 shadow-inner">
+            <Receipt className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
           </div>
-          <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-2xl bg-white/20 backdrop-blur-xs flex items-center justify-center shrink-0 border border-white/25 group-hover:scale-110 transition-transform shadow-inner">
-            <Receipt className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
+          <div className="min-w-0 text-left">
+            <div className="text-xs sm:text-sm font-bold text-white truncate tracking-tight">
+              + Transaction
+            </div>
+            <div className="text-[10px] sm:text-[11px] text-orange-100/90 truncate font-medium">
+              Income / Expense
+            </div>
           </div>
         </button>
 
@@ -116,23 +112,19 @@ export function Dashboard({
           id="home-quick-add-order-btn"
           type="button"
           onClick={onOpenAddOrder}
-          className="group relative overflow-hidden bg-gradient-to-br from-zinc-900 to-zinc-950 hover:from-zinc-850 hover:to-zinc-900 text-white p-4 sm:p-5 rounded-3xl shadow-lg shadow-black/40 active:scale-95 transition-all text-left flex items-center justify-between border border-zinc-800 hover:border-zinc-700 cursor-pointer"
+          className="group bg-zinc-900 hover:bg-zinc-850 text-white p-3 sm:p-3.5 rounded-2xl shadow-md shadow-black/30 active:scale-95 transition-all flex items-center gap-2.5 sm:gap-3 border border-zinc-800 hover:border-zinc-700 cursor-pointer"
           title="Create New Order (Supplier & Material)"
         >
-          <div className="min-w-0 pr-2">
-            <div className="flex items-center gap-1.5 text-xs font-semibold text-blue-400 uppercase tracking-wider">
-              <Plus className="w-3.5 h-3.5 stroke-[3]" />
-              <span>New Order</span>
-            </div>
-            <div className="text-lg sm:text-2xl font-black mt-0.5 truncate tracking-tight text-white group-hover:translate-x-0.5 transition-transform">
-              + Order
-            </div>
-            <p className="text-[11px] sm:text-xs text-zinc-400 truncate mt-0.5 font-medium">
-              Supplier & Materials
-            </p>
+          <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-blue-500/15 border border-blue-500/30 flex items-center justify-center shrink-0 text-blue-400 shadow-inner">
+            <PackagePlus className="w-4 h-4 sm:w-5 sm:h-5 text-blue-400" />
           </div>
-          <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-2xl bg-blue-500/15 border border-blue-500/25 flex items-center justify-center shrink-0 group-hover:scale-110 transition-transform text-blue-400 shadow-inner">
-            <PackagePlus className="w-5 h-5 sm:w-6 sm:h-6" />
+          <div className="min-w-0 text-left">
+            <div className="text-xs sm:text-sm font-bold text-white truncate tracking-tight">
+              + New Order
+            </div>
+            <div className="text-[10px] sm:text-[11px] text-zinc-400 truncate font-medium">
+              Supplier & Items
+            </div>
           </div>
         </button>
       </div>

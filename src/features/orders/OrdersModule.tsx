@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Search, 
@@ -148,6 +148,37 @@ export function OrdersModule({
 
     return result;
   }, [orders, statusFilter, orderSearchQuery, sortAsc]);
+
+  // Progressive Lazy Loading (Virtual Pagination to prevent system freeze on large datasets)
+  const PAGE_SIZE = 25;
+  const [displayLimit, setDisplayLimit] = useState(PAGE_SIZE);
+  const loadMoreSentinelRef = useRef<HTMLDivElement>(null);
+
+  // Reset pagination limit when filters change
+  useEffect(() => {
+    setDisplayLimit(PAGE_SIZE);
+  }, [statusFilter, orderSearchQuery, sortAsc]);
+
+  const visibleOrders = useMemo(() => {
+    return filteredOrders.slice(0, displayLimit);
+  }, [filteredOrders, displayLimit]);
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && displayLimit < filteredOrders.length) {
+          setDisplayLimit((prev) => Math.min(prev + PAGE_SIZE, filteredOrders.length));
+        }
+      },
+      { threshold: 0.1, rootMargin: '300px' }
+    );
+
+    const target = loadMoreSentinelRef.current;
+    if (target) observer.observe(target);
+    return () => {
+      if (target) observer.unobserve(target);
+    };
+  }, [displayLimit, filteredOrders.length]);
 
   const filteredSummary = useMemo(() => {
     const totalCount = filteredOrders.length;
@@ -854,7 +885,7 @@ export function OrdersModule({
       {/* Orders List */}
       <div className="grid gap-4">
         <AnimatePresence mode="popLayout">
-          {filteredOrders.map((order: Order) => (
+          {visibleOrders.map((order: Order) => (
             <OrderCard
               key={order.order_id}
               order={order}
@@ -872,6 +903,34 @@ export function OrdersModule({
             />
           ))}
         </AnimatePresence>
+
+        {/* Progressive Scroll Loading Sentinel for Orders */}
+        {filteredOrders.length > displayLimit && (
+          <div 
+            ref={loadMoreSentinelRef} 
+            className="p-4 text-center bg-zinc-900 border border-zinc-800 rounded-2xl"
+          >
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-2.5">
+              <div className="flex items-center gap-2 text-zinc-400 text-xs font-medium">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-400" />
+                <span>Showing {visibleOrders.length} of {filteredOrders.length} orders</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDisplayLimit((prev) => Math.min(prev + PAGE_SIZE * 2, filteredOrders.length))}
+                className="px-3.5 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-750 text-xs font-semibold text-zinc-200 hover:text-white transition-colors border border-zinc-700/60 cursor-pointer shadow-xs active:scale-95"
+              >
+                Load Next 50
+              </button>
+            </div>
+          </div>
+        )}
+
+        {filteredOrders.length > PAGE_SIZE && visibleOrders.length >= filteredOrders.length && (
+          <div className="p-3 text-center bg-zinc-900/50 border border-zinc-800/60 rounded-2xl text-zinc-500 text-xs font-medium">
+            ✓ All {filteredOrders.length} orders loaded
+          </div>
+        )}
 
         {filteredOrders.length === 0 && (
           <div className="text-center py-12 bg-zinc-900 border border-zinc-800 rounded-3xl">
